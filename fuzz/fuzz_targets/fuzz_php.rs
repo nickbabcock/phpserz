@@ -3,9 +3,11 @@ use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     let mut parser = phpserz::PhpParser::new(data);
+    while let Ok(Some(token)) = parser.next_token() {
+        let phpserz::PhpToken::String(bstr) = token else {
+            continue;
+        };
 
-    let mut storage = Vec::new();
-    while let Ok(Some(_)) = parser.next_token(&mut storage) {
-
+        let _ = bstr.to_property();
     }
 });

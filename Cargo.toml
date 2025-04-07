@@ -13,6 +13,7 @@ include = ["src/**/*.rs"]
 rust-version = "1.85"
 
 [dependencies]
+fast-float2 = "0.2.3"
 serde = { version = "1.0.219", features = ["derive"], optional = true }
 
 [features]
@@ -21,7 +22,3 @@ serde = ["dep:serde"]
 
 [dev-dependencies]
 rstest = "0.25.0"
-
-
-[package.metadata.docs.rs]
-all-features = true

@@ -5,31 +5,72 @@ pub struct Error {
     kind: ErrorKind,
 }
 
-#[derive(Debug)]
-pub enum ErrorKind {
-    Io(std::io::Error),
-    PhpParse(PhpParseError),
-    Utf8(std::str::Utf8Error, usize),
-    ParseInt(std::num::ParseIntError, usize),
-    ParseFloat(std::num::ParseFloatError, usize),
-    Deserialize(String),
+impl Error {
+    #[must_use]
+    pub const fn kind(&self) -> &ErrorKind {
+        &self.kind
+    }
+
+    #[must_use]
+    pub const fn position(&self) -> Option<usize> {
+        match &self.kind {
+            ErrorKind::MismatchByte { position, .. }
+            | ErrorKind::UnexpectedByte { position, .. }
+            | ErrorKind::Empty { position }
+            | ErrorKind::MissingQuotes { position }
+            | ErrorKind::StringTooLong { position }
+            | ErrorKind::InvalidNumber { position }
+            | ErrorKind::Overflow { position } => Some(*position),
+            ErrorKind::Eof | ErrorKind::Deserialize(_) | ErrorKind::Utf8(_) => None,
+        }
+    }
 }
 
 #[derive(Debug)]
-pub struct PhpParseError {
-    pub message: String,
-    pub position: usize,
+#[non_exhaustive]
+pub enum ErrorKind {
+    Eof,
+    MismatchByte {
+        expected: u8,
+        found: u8,
+        position: usize,
+    },
+    UnexpectedByte {
+        found: u8,
+        position: usize,
+    },
+    Utf8(std::str::Utf8Error),
+    Deserialize(String),
+    Empty {
+        position: usize,
+    },
+    MissingQuotes {
+        position: usize,
+    },
+    StringTooLong {
+        position: usize,
+    },
+    InvalidNumber {
+        position: usize,
+    },
+    Overflow {
+        position: usize,
+    },
 }
 
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match &self.kind {
-            ErrorKind::Io(err) => Some(err),
-            ErrorKind::Deserialize(_) => None,
-            ErrorKind::PhpParse(_) => None,
-            ErrorKind::Utf8(err, _) => Some(err),
-            ErrorKind::ParseInt(err, _) => Some(err),
-            ErrorKind::ParseFloat(err, _) => Some(err),
+            ErrorKind::Empty { .. }
+            | ErrorKind::MismatchByte { .. }
+            | ErrorKind::UnexpectedByte { .. }
+            | ErrorKind::Eof
+            | ErrorKind::Deserialize(_)
+            | ErrorKind::StringTooLong { .. }
+            | ErrorKind::InvalidNumber { .. }
+            | ErrorKind::Overflow { .. }
+            | ErrorKind::MissingQuotes { .. } => None,
+            ErrorKind::Utf8(err) => Some(err),
         }
     }
 }
@@ -37,44 +78,64 @@ impl std::error::Error for Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.kind {
-            ErrorKind::Io(err) => write!(f, "IO error: {}", err),
-            ErrorKind::Deserialize(err) => write!(f, "Deserialization error: {}", err),
-            ErrorKind::PhpParse(err) => write!(
-                f,
-                "PHP parse error at byte position {}: {}",
-                err.position, err.message
-            ),
-            ErrorKind::Utf8(err, pos) => write!(
-                f,
-                "UTF-8 conversion error at byte position {}: {}",
-                pos, err
-            ),
-            ErrorKind::ParseInt(err, pos) => {
-                write!(f, "Integer parse error at byte position {}: {}", pos, err)
+            ErrorKind::MismatchByte {
+                expected,
+                found,
+                position,
+            } => {
+                if found.is_ascii_alphanumeric() {
+                    write!(
+                        f,
+                        "Expected byte '{}', found '{}' at position: {}",
+                        *expected as char, *found as char, position
+                    )
+                } else {
+                    write!(
+                        f,
+                        "Expected byte '{}', found 0x{:02x} at position: {}",
+                        *expected as char, found, position
+                    )
+                }
             }
-            ErrorKind::ParseFloat(err, pos) => {
-                write!(f, "Float parse error at byte position {}: {}", pos, err)
+            ErrorKind::UnexpectedByte { found, position } => {
+                if found.is_ascii_alphanumeric() {
+                    write!(
+                        f,
+                        "Unexpected byte '{}' at position: {}",
+                        *found as char, position
+                    )
+                } else {
+                    write!(f, "Unexpected byte 0x{found:02x} at position: {position}")
+                }
             }
-        }
-    }
-}
-
-impl From<std::io::Error> for Error {
-    fn from(err: std::io::Error) -> Self {
-        Error {
-            kind: ErrorKind::Io(err),
+            ErrorKind::Eof => write!(f, "Unexpected end of data"),
+            ErrorKind::Deserialize(err) => write!(f, "Deserialization error: {err}"),
+            ErrorKind::Empty { position } => {
+                write!(f, "Unable to decode empty data at position: {position}")
+            }
+            ErrorKind::MissingQuotes { position } => {
+                write!(f, "Missing quotes in string at position: {position}")
+            }
+            ErrorKind::StringTooLong { position } => {
+                write!(f, "String is too long at position: {position}")
+            }
+            ErrorKind::InvalidNumber { position } => {
+                write!(f, "Invalid number at position: {position}")
+            }
+            ErrorKind::Overflow { position } => write!(f, "Overflow at position: {position}"),
+            ErrorKind::Utf8(err) => write!(f, "UTF-8 conversion error: {err}"),
         }
     }
 }
 
 impl From<ErrorKind> for Error {
     fn from(kind: ErrorKind) -> Self {
-        Error { kind }
+        Self { kind }
     }
 }
 
 impl serde::de::Error for Error {
     fn custom<T: fmt::Display>(msg: T) -> Self {
-        Error::from(ErrorKind::Deserialize(msg.to_string()))
+        Self::from(ErrorKind::Deserialize(msg.to_string()))
     }
 }
