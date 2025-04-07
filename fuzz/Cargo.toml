@@ -1,0 +1,21 @@
+[package]
+name = "phpserz-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.phpserz]
+path = ".."
+
+[[bin]]
+name = "fuzz_php"
+path = "fuzz_targets/fuzz_php.rs"
+test = false
+doc = false
+bench = false

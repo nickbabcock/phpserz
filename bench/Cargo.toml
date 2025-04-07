@@ -1,0 +1,30 @@
+[package]
+publish = false
+name = "phpserz-bench"
+version = "0.0.1"
+authors = ["Nick Babcock <nbabcock19@hotmail.com>"]
+description = "Criterion benchmark suite for phpserz."
+homepage = "https://github.com/nickbabcock/phpserz/tree/master/bench"
+repository = "https://github.com/nickbabcock/phpserz"
+license = "MIT"
+edition = "2021"
+
+[workspace]
+
+[lib]
+bench = false
+
+[[bench]]
+name = "phpserz-bench"
+harness = false
+path = "src/bench.rs"
+
+[dependencies]
+criterion = "0.5.1"
+phpserz = { path = ".." }
+
+[profile.release]
+debug = true
+
+[profile.bench]
+debug = true

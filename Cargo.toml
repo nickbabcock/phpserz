@@ -1,0 +1,27 @@
+[package]
+name = "phpserz"
+version = "0.1.0"
+edition = "2024"
+authors = ["Nick Babcock <nbabcock19@hotmail.com>"]
+description = "A PHP serialization format parser and deserializer"
+repository = "https://github.com/nickbabcock/phpserz"
+readme = "README.md"
+license = "MIT"
+keywords = ["php", "serde", "parser"]
+categories = ["parser-implementations"]
+include = ["src/**/*.rs"]
+rust-version = "1.85"
+
+[dependencies]
+serde = { version = "1.0.219", features = ["derive"], optional = true }
+
+[features]
+default = ["serde"]
+serde = ["dep:serde"]
+
+[dev-dependencies]
+rstest = "0.25.0"
+
+
+[package.metadata.docs.rs]
+all-features = true
