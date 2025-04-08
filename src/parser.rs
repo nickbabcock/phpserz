@@ -11,19 +11,34 @@ pub struct PhpBstr<'a> {
 }
 
 impl<'a> PhpBstr<'a> {
+    /// Create a new byte string from a slice of bytes.
+    #[must_use]
     pub const fn new(data: &'a [u8]) -> Self {
         Self { data }
     }
 
+    /// Get the underlying bytes of the byte string.
     pub const fn as_bytes(&self) -> &'a [u8] {
         self.data
     }
 
-    pub fn to_str(&self) -> Result<&'a str, Error> {
+    /// Convert the byte string to a string.
+    pub fn to_str(self) -> Result<&'a str, Error> {
         std::str::from_utf8(self.data).map_err(|e| Error::from(ErrorKind::Utf8(e)))
     }
 
-    pub fn to_property(&self) -> Result<(&'a str, PhpVisibility), Error> {
+    /// Convert the byte string to a property name with a visibility.
+    ///
+    /// This assumes the caller is deserializing a PHP property which can either be public, protected, or private.
+    ///
+    /// > Private properties are prefixed with `\0ClassName\0` and protected properties with `\0*\0`.
+    ///
+    /// Source: https://www.phpinternalsbook.com/php5/classes_objects/serialization.html
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if the byte string is not a valid UTF-8.
+    pub fn to_property(self) -> Result<(&'a str, PhpVisibility), Error> {
         let (data, visibility) = match self.data {
             [0, b'*', 0, contents @ ..] => (contents, PhpVisibility::Protected),
             [0, tail @ ..] => {
@@ -52,19 +67,38 @@ pub enum PhpVisibility {
     Private,
 }
 
+/// A token in the PHP serialized format.
 #[derive(Debug, PartialEq)]
 pub enum PhpToken<'a> {
+    /// The null token.
     Null,
+
+    /// The boolean token.
     Boolean(bool),
+
+    /// The integer token.
     Integer(i32),
+
+    /// The float token.
     Float(f64),
+
+    /// The string token.
     String(PhpBstr<'a>),
+
+    /// The array token.
     Array { elements: u32 },
+
+    /// The object token.
     Object { class: PhpBstr<'a>, properties: u32 },
+
+    /// The end of an array or object.
     End,
+
+    /// The reference token.
     Reference(i32),
 }
 
+/// The kind of token without data.
 #[derive(Debug, PartialEq, Clone, Copy, Eq, Hash)]
 pub enum PhpTokenKind {
     Null,
@@ -78,6 +112,8 @@ pub enum PhpTokenKind {
     Reference,
 }
 
+/// A parser for the PHP serialized format.
+#[derive(Debug)]
 pub struct PhpParser<'a> {
     data: &'a [u8],
     lookahead: Option<(PhpTokenKind, usize)>,
@@ -85,6 +121,7 @@ pub struct PhpParser<'a> {
 }
 
 impl<'a> PhpParser<'a> {
+    /// Create a new parser from a slice of bytes.
     #[must_use]
     pub const fn new(data: &'a [u8]) -> Self {
         Self {
@@ -94,7 +131,7 @@ impl<'a> PhpParser<'a> {
         }
     }
 
-    #[inline]
+    /// Get the current position of the parser.
     #[must_use]
     pub const fn position(&self) -> usize {
         self.position
@@ -153,12 +190,27 @@ impl<'a> PhpParser<'a> {
         }
     }
 
-    pub const fn consume_lookahead(&mut self) {
+    #[cfg_attr(not(feature = "serde"), allow(dead_code))]
+    pub(crate) const fn consume_lookahead(&mut self) {
         if let Some((_, position)) = self.lookahead.take() {
             self.position = position;
         }
     }
 
+    /// Peek at the kind of the next token without consuming it.
+    ///
+    /// Useful for detecting end of arrays and objects.
+    ///
+    /// See [Self::consume_lookahead] for consuming the lookahead that is set by this function.
+    ///
+    /// Calling this function multiple times will return the same token.
+    ///
+    /// ```rust
+    /// use phpserz::{PhpParser, PhpToken, PhpTokenKind};
+    /// let mut parser = PhpParser::new(b"i:42;");
+    /// assert_eq!(parser.peek_token().unwrap(), Some(PhpTokenKind::Integer));
+    /// assert_eq!(parser.next_token().unwrap(), Some(PhpToken::Integer(42)));
+    /// ```
     pub fn peek_token(&mut self) -> Result<Option<PhpTokenKind>, Error> {
         if let Some((token, _)) = self.lookahead {
             return Ok(Some(token));
@@ -174,12 +226,20 @@ impl<'a> PhpParser<'a> {
         }
     }
 
+    /// Reads the next token, and will error if the end of the input is reached.
     #[inline]
     pub fn read_token(&mut self) -> Result<PhpToken<'a>, Error> {
         let token = self.next_token()?;
         Ok(token.ok_or(ErrorKind::Eof)?)
     }
 
+    /// Attempt to read the next token. Will return Ok(None) if the end of the input is reached.
+    ///
+    /// ```rust
+    /// use phpserz::{PhpParser, PhpToken, PhpTokenKind};
+    /// let mut parser = PhpParser::new(b"i:42;");
+    /// assert_eq!(parser.next_token().unwrap(), Some(PhpToken::Integer(42)));
+    /// ```
     #[inline]
     pub fn next_token(&mut self) -> Result<Option<PhpToken<'a>>, Error> {
         let (kind, position) = match self.lookahead.take() {
@@ -1019,5 +1079,30 @@ mod tests {
             input.len(),
             "Position should be at the end of input"
         );
+    }
+
+    #[test]
+    fn test_readme() -> Result<(), Box<dyn std::error::Error>> {
+        let serialized = b"O:7:\"Example\":5:{s:4:\"name\";s:8:\"John Doe\";s:12:\"\0Example\0age\";i:42;s:11:\"\0*\0isActive\";b:1;s:6:\"scores\";a:3:{i:0;d:95.5;i:1;d:88.0;i:2;d:92.3;}s:8:\"metadata\";a:2:{s:2:\"id\";i:12345;s:4:\"tags\";a:3:{i:0;s:3:\"php\";i:1;s:4:\"rust\";i:2;s:13:\"serialization\";}}}";
+        let mut parser = PhpParser::new(&serialized[..]);
+
+        assert_eq!(
+            parser.read_token()?,
+            PhpToken::Object {
+                class: PhpBstr::new(b"Example"),
+                properties: 5
+            }
+        );
+
+        let PhpToken::String(prop) = parser.read_token()? else {
+            panic!("Expected a string token");
+        };
+
+        assert_eq!(prop, PhpBstr::new(b"name"));
+        let (name, visibility) = prop.to_property()?;
+        assert_eq!(name, "name");
+        assert_eq!(visibility, PhpVisibility::Public);
+
+        Ok(())
     }
 }

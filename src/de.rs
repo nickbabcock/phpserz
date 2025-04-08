@@ -3,11 +3,14 @@ use crate::parser::{PhpParser, PhpToken, PhpTokenKind};
 use serde::Deserializer;
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess};
 
+/// A deserializer for PHP serialized data.
+#[derive(Debug)]
 pub struct PhpDeserializer<'de> {
     parser: PhpParser<'de>,
 }
 
 impl<'de> PhpDeserializer<'de> {
+    /// Create a new deserializer from a slice of bytes.
     #[must_use]
     pub const fn new(data: &'de [u8]) -> Self {
         PhpDeserializer {
@@ -32,9 +35,10 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
             PhpToken::Array { .. } => visitor.visit_seq(self),
             PhpToken::Object { .. } => visitor.visit_map(self),
             PhpToken::Reference(r) => visitor.visit_i32(r),
-            PhpToken::End => Err(Error::from(ErrorKind::Deserialize(
-                "Unexpected end token".to_string(),
-            ))),
+            PhpToken::End => Err(Error::from(ErrorKind::Deserialize {
+                message: "Unexpected end token".to_string(),
+                position: Some(self.parser.position()),
+            })),
         }
     }
 
@@ -210,12 +214,14 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
             Some(PhpToken::Array { elements }) if (elements as usize) == len => {
                 visitor.visit_seq(self)
             }
-            Some(PhpToken::Array { .. }) => Err(Error::from(ErrorKind::Deserialize(
-                "Array length mismatch".to_string(),
-            ))),
-            _ => Err(Error::from(ErrorKind::Deserialize(
-                "Expected array".to_string(),
-            ))),
+            Some(PhpToken::Array { .. }) => Err(Error::from(ErrorKind::Deserialize {
+                message: "Array length mismatch".to_string(),
+                position: Some(self.parser.position()),
+            })),
+            _ => Err(Error::from(ErrorKind::Deserialize {
+                message: "Expected array".to_string(),
+                position: Some(self.parser.position()),
+            })),
         }
     }
 
@@ -237,9 +243,10 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
     {
         match self.parser.read_token()? {
             PhpToken::Array { .. } | PhpToken::Object { .. } => visitor.visit_map(self),
-            _ => Err(Error::from(ErrorKind::Deserialize(
-                "Expected array or object".to_string(),
-            ))),
+            _ => Err(Error::from(ErrorKind::Deserialize {
+                message: "Expected array or object".to_string(),
+                position: Some(self.parser.position()),
+            })),
         }
     }
 
@@ -264,9 +271,10 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
     where
         V: de::Visitor<'de>,
     {
-        Err(Error::from(ErrorKind::Deserialize(
-            "PHP does not support enum deserialization".to_string(),
-        )))
+        Err(Error::from(ErrorKind::Deserialize {
+            message: "PHP does not support enum deserialization".to_string(),
+            position: Some(self.parser.position()),
+        }))
     }
 
     fn deserialize_identifier<V>(self, visitor: V) -> Result<V::Value, Self::Error>
@@ -285,9 +293,10 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
             PhpToken::Array { .. } => visitor.visit_seq(self),
             PhpToken::Object { .. } => visitor.visit_map(self),
             PhpToken::Reference(r) => visitor.visit_i32(r),
-            PhpToken::End => Err(Error::from(ErrorKind::Deserialize(
-                "Unexpected end token".to_string(),
-            ))),
+            PhpToken::End => Err(Error::from(ErrorKind::Deserialize {
+                message: "Unexpected end token".to_string(),
+                position: Some(self.parser.position()),
+            })),
         }
     }
 
@@ -317,12 +326,6 @@ impl<'de> SeqAccess<'de> for &'_ mut PhpDeserializer<'de> {
 
         seed.deserialize(&mut **self).map(Some)
     }
-}
-
-#[derive(Debug)]
-enum MapState {
-    Key,
-    Value,
 }
 
 impl<'de> MapAccess<'de> for &'_ mut PhpDeserializer<'de> {
@@ -356,7 +359,11 @@ impl<'de> MapAccess<'de> for &'_ mut PhpDeserializer<'de> {
 mod tests {
     use super::*;
     use serde::Deserialize;
-    use std::{collections::HashMap, fmt, marker::PhantomData};
+    use std::{
+        collections::{BTreeMap, HashMap},
+        fmt,
+        marker::PhantomData,
+    };
 
     #[derive(Debug, PartialEq, Deserialize)]
     struct Person {
@@ -567,5 +574,47 @@ mod tests {
         expected.insert("baz".to_string(), "qux".to_string());
 
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_readme() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct Example {
+            name: String,
+            age: i32,
+            #[serde(rename = "isActive")]
+            is_active: bool,
+            scores: BTreeMap<u32, f64>,
+            metadata: Metadata,
+        }
+
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct Metadata {
+            id: i32,
+            tags: BTreeMap<u32, String>,
+        }
+
+        let serialized = b"O:7:\"Example\":5:{s:4:\"name\";s:8:\"John Doe\";s:12:\"\0Example\0age\";i:42;s:11:\"\0*\0isActive\";b:1;s:6:\"scores\";a:3:{i:0;d:95.5;i:1;d:88.0;i:2;d:92.3;}s:8:\"metadata\";a:2:{s:2:\"id\";i:12345;s:4:\"tags\";a:3:{i:0;s:3:\"php\";i:1;s:4:\"rust\";i:2;s:13:\"serialization\";}}}";
+
+        let mut deserializer = PhpDeserializer::new(serialized);
+        let example = Example::deserialize(&mut deserializer).unwrap();
+
+        assert_eq!(
+            example,
+            Example {
+                name: "John Doe".to_string(),
+                age: 42,
+                is_active: true,
+                scores: BTreeMap::from([(0, 95.5), (1, 88.0), (2, 92.3),]),
+                metadata: Metadata {
+                    id: 12345,
+                    tags: BTreeMap::from([
+                        (0, "php".to_string()),
+                        (1, "rust".to_string()),
+                        (2, "serialization".to_string())
+                    ]),
+                }
+            }
+        );
     }
 }
