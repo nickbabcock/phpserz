@@ -77,7 +77,7 @@ pub enum PhpToken<'a> {
     Boolean(bool),
 
     /// The integer token.
-    Integer(i32),
+    Integer(i64),
 
     /// The float token.
     Float(f64),
@@ -95,7 +95,7 @@ pub enum PhpToken<'a> {
     End,
 
     /// The reference token.
-    Reference(i32),
+    Reference(i64),
 }
 
 /// The kind of token without data.
@@ -282,7 +282,7 @@ impl<'a> PhpParser<'a> {
             }
             PhpTokenKind::Integer => {
                 self.expect(b':')?;
-                let (int, rest) = to_i32(self.data).map_err(|e| self.map_error(e))?;
+                let (int, rest) = to_i64(self.data).map_err(|e| self.map_error(e))?;
                 let bytes_read = self.data.len() - rest.len();
                 self.data = rest;
                 self.position += bytes_read;
@@ -339,7 +339,7 @@ impl<'a> PhpParser<'a> {
             }
             PhpTokenKind::Reference => {
                 self.expect(b':')?;
-                let (int, rest) = to_i32(self.data).map_err(|e| self.map_error(e))?;
+                let (int, rest) = to_i64(self.data).map_err(|e| self.map_error(e))?;
                 let bytes_read = self.data.len() - rest.len();
                 self.position += bytes_read;
                 Ok(Some(PhpToken::Reference(int)))
@@ -404,7 +404,11 @@ fn read_u32(mut data: &[u8], delimiter: u8) -> Result<(u32, &[u8]), ScalarError>
     let mut result = 0u64;
     let original_len = data.len();
     while let Some((&c, rest)) = data.split_first() {
-        if c == delimiter {
+        if c.is_ascii_digit() {
+            result = result.wrapping_mul(10);
+            result = result.wrapping_add(u64::from(c - b'0'));
+            data = rest;
+        } else if c == delimiter {
             let bytes_read = original_len - rest.len();
 
             if bytes_read == 0 {
@@ -417,35 +421,28 @@ fn read_u32(mut data: &[u8], delimiter: u8) -> Result<(u32, &[u8]), ScalarError>
             }
 
             return Ok((result as u32, rest));
-        }
-
-        if !c.is_ascii_digit() {
+        } else {
             return Err(ScalarError::Invalid);
         }
-
-        result = result.wrapping_mul(10);
-        result = result.wrapping_add(u64::from(c - b'0'));
-        data = rest;
     }
 
     Err(ScalarError::Eof)
 }
 
 #[inline]
-fn to_i32(d: &[u8]) -> Result<(i32, &[u8]), ScalarError> {
+fn to_i64(d: &[u8]) -> Result<(i64, &[u8]), ScalarError> {
     let mut integer_part = d;
 
     let Some((&c, mut data)) = d.split_first() else {
         return Err(ScalarError::Empty);
     };
 
-    let mut sign = 1;
-
+    let mut negative = 0;
     let mut result = if c.is_ascii_digit() {
         u64::from(c - b'0')
     } else if c == b'-' {
         integer_part = data;
-        sign = -1;
+        negative = 1;
         0
     } else {
         return Err(ScalarError::Invalid);
@@ -453,34 +450,52 @@ fn to_i32(d: &[u8]) -> Result<(i32, &[u8]), ScalarError> {
 
     let original_len = integer_part.len();
     while let Some((&c, rest)) = data.split_first() {
-        if c == b';' {
+        if c.is_ascii_digit() {
+            result = result.wrapping_mul(10);
+            result = result.wrapping_add(u64::from(c - b'0'));
+            data = rest;
+        } else if c == b';' {
             let bytes_read = original_len - rest.len();
             if bytes_read == 0 {
                 return Err(ScalarError::Empty);
             }
 
             // Check for overflow
-            if result > (i32::MAX as u64) + 1 || bytes_read > 11 {
+            if bytes_read > 19 {
+                check_overflow(integer_part, 0)?;
+            }
+
+            if result > (i64::MAX as u64) + negative {
                 return Err(ScalarError::Overflow);
             }
 
-            let Ok(val) = i64::try_from(result)
-                .map(|x| sign * x)
-                .and_then(i32::try_from)
-            else {
-                return Err(ScalarError::Overflow);
-            };
-            return Ok((val, rest));
-        } else if !c.is_ascii_digit() {
+            let sign = -((negative as i64 * 2).wrapping_sub(1));
+            return Ok((sign.wrapping_mul(result as i64), rest));
+        } else {
             return Err(ScalarError::Invalid);
         }
-
-        result = result.wrapping_mul(10);
-        result = result.wrapping_add(u64::from(c - b'0'));
-        data = rest;
     }
 
     Err(ScalarError::Eof)
+}
+
+#[cold]
+fn check_overflow(d: &[u8], start: u64) -> Result<(), ScalarError> {
+    let mut acc = start;
+    for &x in d {
+        // The input should already be validated by this point, so we just
+        // return if we find a non-digit.
+        if !x.is_ascii_digit() {
+            return Ok(());
+        }
+
+        acc = acc
+            .checked_mul(10)
+            .and_then(|acc| acc.checked_add(u64::from(x - b'0')))
+            .ok_or(ScalarError::Overflow)?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -525,8 +540,11 @@ mod tests {
     #[case("i:42;", PhpToken::Integer(42))]
     #[case("i:-123;", PhpToken::Integer(-123))]
     #[case("i:0;", PhpToken::Integer(0))]
-    #[case("i:2147483647;", PhpToken::Integer(i32::MAX))]
-    #[case("i:-2147483648;", PhpToken::Integer(i32::MIN))]
+    #[case("i:9223372036854775807;", PhpToken::Integer(i64::MAX))]
+    #[case("i:-9223372036854775808;", PhpToken::Integer(i64::MIN))]
+    #[case("i:-9223372036854775807;", PhpToken::Integer(i64::MIN + 1))]
+    #[case("i:2147483648;", PhpToken::Integer(2147483648))] // i32::MAX + 1
+    #[case("i:-2147483649;", PhpToken::Integer(-2147483649))] // i32::MIN - 1
     fn test_parse_integer(#[case] input: &str, #[case] expected: PhpToken<'_>) {
         let mut parser = PhpParser::new(input.as_bytes());
         assert_eq!(parser.next_token().unwrap(), Some(expected));
@@ -714,10 +732,10 @@ mod tests {
     #[case(b"i:1a;")]
     #[case(b"i: 42;")]
     #[case(b"i:+42;")]
-    #[case(b"i:2147483648;")] // i32::MAX + 1
-    #[case(b"i:9999999999;")] // Definitely too big for i32
-    #[case(b"i:-2147483649;")] // i32::MIN - 1
-    #[case(b"i:-9999999999;")] // Definitely too small for i32
+    #[case(b"i:9223372036854775808;")] // i64::MAX + 1
+    #[case(b"i:9999999999999999999;")] // Definitely too big for i64
+    #[case(b"i:-9223372036854775809;")] // i64::MIN - 1
+    #[case(b"i:-9999999999999999999;")] // Definitely too small for i64
     fn test_invalid_integer_values(#[case] input: &[u8]) {
         assert!(
             error_case(input).is_err(),

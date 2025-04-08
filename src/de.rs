@@ -29,12 +29,12 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
         match self.parser.read_token()? {
             PhpToken::Null => visitor.visit_unit(),
             PhpToken::Boolean(b) => visitor.visit_bool(b),
-            PhpToken::Integer(i) => visitor.visit_i32(i),
+            PhpToken::Integer(i) => visitor.visit_i64(i),
             PhpToken::Float(f) => visitor.visit_f64(f),
             PhpToken::String(s) => visitor.visit_borrowed_bytes(s.as_bytes()),
             PhpToken::Array { .. } => visitor.visit_seq(self),
             PhpToken::Object { .. } => visitor.visit_map(self),
-            PhpToken::Reference(r) => visitor.visit_i32(r),
+            PhpToken::Reference(r) => visitor.visit_i64(r),
             PhpToken::End => Err(Error::from(ErrorKind::Deserialize {
                 message: "Unexpected end token".to_string(),
                 position: Some(self.parser.position()),
@@ -284,7 +284,7 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
         match self.parser.read_token()? {
             PhpToken::Null => visitor.visit_unit(),
             PhpToken::Boolean(b) => visitor.visit_bool(b),
-            PhpToken::Integer(i) => visitor.visit_i32(i),
+            PhpToken::Integer(i) => visitor.visit_i64(i),
             PhpToken::Float(f) => visitor.visit_f64(f),
             PhpToken::String(s) => {
                 let (name, _) = s.to_property()?;
@@ -292,7 +292,7 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
             }
             PhpToken::Array { .. } => visitor.visit_seq(self),
             PhpToken::Object { .. } => visitor.visit_map(self),
-            PhpToken::Reference(r) => visitor.visit_i32(r),
+            PhpToken::Reference(r) => visitor.visit_i64(r),
             PhpToken::End => Err(Error::from(ErrorKind::Deserialize {
                 message: "Unexpected end token".to_string(),
                 position: Some(self.parser.position()),
@@ -445,8 +445,24 @@ mod tests {
     fn test_deserialize_integer() {
         let input = b"i:123;";
         let mut deserializer = PhpDeserializer::new(&input[..]);
-        let result: i32 = Deserialize::deserialize(&mut deserializer).unwrap();
+        let result: i64 = Deserialize::deserialize(&mut deserializer).unwrap();
         assert_eq!(result, 123);
+    }
+
+    #[test]
+    fn test_deserialize_large_integer() {
+        let input = b"i:9223372036854775807;"; // i64::MAX
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: i64 = Deserialize::deserialize(&mut deserializer).unwrap();
+        assert_eq!(result, i64::MAX);
+    }
+
+    #[test]
+    fn test_deserialize_negative_large_integer() {
+        let input = b"i:-9223372036854775808;"; // i64::MIN
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: i64 = Deserialize::deserialize(&mut deserializer).unwrap();
+        assert_eq!(result, i64::MIN);
     }
 
     #[test]
