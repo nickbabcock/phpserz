@@ -1,16 +1,17 @@
-use std::fmt;
-
+/// An PHPserz error.
 #[derive(Debug)]
 pub struct Error {
     kind: ErrorKind,
 }
 
 impl Error {
+    /// Get the kind of error.
     #[must_use]
     pub const fn kind(&self) -> &ErrorKind {
         &self.kind
     }
 
+    /// Get the position of the error.
     #[must_use]
     pub const fn position(&self) -> Option<usize> {
         match &self.kind {
@@ -21,11 +22,13 @@ impl Error {
             | ErrorKind::StringTooLong { position }
             | ErrorKind::InvalidNumber { position }
             | ErrorKind::Overflow { position } => Some(*position),
-            ErrorKind::Eof | ErrorKind::Deserialize(_) | ErrorKind::Utf8(_) => None,
+            ErrorKind::Deserialize { position, .. } => *position,
+            ErrorKind::Eof | ErrorKind::Utf8(_) => None,
         }
     }
 }
 
+/// The kind of error that can occur when working with PHP serialized data.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ErrorKind {
@@ -40,7 +43,10 @@ pub enum ErrorKind {
         position: usize,
     },
     Utf8(std::str::Utf8Error),
-    Deserialize(String),
+    Deserialize {
+        message: String,
+        position: Option<usize>,
+    },
     Empty {
         position: usize,
     },
@@ -65,7 +71,7 @@ impl std::error::Error for Error {
             | ErrorKind::MismatchByte { .. }
             | ErrorKind::UnexpectedByte { .. }
             | ErrorKind::Eof
-            | ErrorKind::Deserialize(_)
+            | ErrorKind::Deserialize { .. }
             | ErrorKind::StringTooLong { .. }
             | ErrorKind::InvalidNumber { .. }
             | ErrorKind::Overflow { .. }
@@ -109,7 +115,13 @@ impl std::fmt::Display for Error {
                 }
             }
             ErrorKind::Eof => write!(f, "Unexpected end of data"),
-            ErrorKind::Deserialize(err) => write!(f, "Deserialization error: {err}"),
+            ErrorKind::Deserialize { message, position } => {
+                if let Some(pos) = position {
+                    write!(f, "Deserialization error: {message} at position: {pos}")
+                } else {
+                    write!(f, "Deserialization error: {message}")
+                }
+            }
             ErrorKind::Empty { position } => {
                 write!(f, "Unable to decode empty data at position: {position}")
             }
@@ -134,8 +146,12 @@ impl From<ErrorKind> for Error {
     }
 }
 
+#[cfg(feature = "serde")]
 impl serde::de::Error for Error {
-    fn custom<T: fmt::Display>(msg: T) -> Self {
-        Self::from(ErrorKind::Deserialize(msg.to_string()))
+    fn custom<T: std::fmt::Display>(msg: T) -> Self {
+        Self::from(ErrorKind::Deserialize {
+            message: msg.to_string(),
+            position: None,
+        })
     }
 }

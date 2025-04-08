@@ -48,6 +48,19 @@ jobs:
     - run: cargo doc --verbose
     - run: cargo test --verbose --all
 
+  test-no-features:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: stable
+    - run: cargo build --verbose --no-default-features
+    - run: cargo doc --verbose --no-default-features
+    - run: cargo test --verbose --no-default-features
+
   # stripped down version of CI to test the MSRV.
   msrv:
     runs-on: ubuntu-latest
@@ -118,4 +131,4 @@ jobs:
         with:
           toolchain: "nightly"
       - run: cargo install cargo-fuzz
-      - run: cargo fuzz build fuzz_zip
+      - run: cargo fuzz build fuzz_php
