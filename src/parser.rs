@@ -33,7 +33,7 @@ impl<'a> PhpBstr<'a> {
     ///
     /// > Private properties are prefixed with `\0ClassName\0` and protected properties with `\0*\0`.
     ///
-    /// Source: https://www.phpinternalsbook.com/php5/classes_objects/serialization.html
+    /// Source: <https://www.phpinternalsbook.com/php5/classes_objects/serialization.html>
     ///
     /// # Errors
     ///
@@ -200,8 +200,6 @@ impl<'a> PhpParser<'a> {
     /// Peek at the kind of the next token without consuming it.
     ///
     /// Useful for detecting end of arrays and objects.
-    ///
-    /// See [Self::consume_lookahead] for consuming the lookahead that is set by this function.
     ///
     /// Calling this function multiple times will return the same token.
     ///

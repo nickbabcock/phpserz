@@ -2,7 +2,7 @@
 
 A Rust crate for parsing and deserializing the PHP serialization format[^wiki].
 
-[^wiki]: https://en.wikipedia.org/wiki/PHP_serialization_format
+[^wiki]: [As documented by wikipedia](https://en.wikipedia.org/wiki/PHP_serialization_format)
 
 ## Features
 
