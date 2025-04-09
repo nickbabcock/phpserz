@@ -163,7 +163,7 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
             .peek_token()?
             .ok_or_else(|| Error::from(ErrorKind::Eof))?;
         if matches!(peeked, PhpTokenKind::Null) {
-            self.parser.consume_lookahead();
+            let _ = self.parser.read_token()?;
             return visitor.visit_none();
         }
 
@@ -531,6 +531,30 @@ mod tests {
                 ("foo".to_string(), "bar".to_string()),
                 ("baz".to_string(), "qux".to_string())
             ]
+        );
+    }
+
+    #[test]
+    fn test_deserialize_object_with_null() {
+        #[derive(Debug, PartialEq, Deserialize)]
+        struct UserProfile {
+            username: String,
+            email: Option<String>,
+            bio: Option<String>,
+        }
+
+        // PHP: new UserProfile(["username" => "john_doe", "email" => "john@example.com", "bio" => null])
+        let input = b"O:11:\"UserProfile\":3:{s:8:\"username\";s:8:\"john_doe\";s:5:\"email\";s:16:\"john@example.com\";s:3:\"bio\";N;}";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: UserProfile = Deserialize::deserialize(&mut deserializer).unwrap();
+
+        assert_eq!(
+            result,
+            UserProfile {
+                username: "john_doe".to_string(),
+                email: Some("john@example.com".to_string()),
+                bio: None,
+            }
         );
     }
 
