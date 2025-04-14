@@ -18,6 +18,23 @@ impl<'de> PhpDeserializer<'de> {
         }
     }
 
+    /// Create a new deserializer from an existing parser.
+    ///
+    /// This is useful when you have already parsed part of a serialized structure
+    /// and want to deserialize the remaining part.
+    #[must_use]
+    pub const fn from_parser(parser: PhpParser<'de>) -> Self {
+        PhpDeserializer { parser }
+    }
+
+    /// Consume this deserializer and return the underlying parser.
+    ///
+    /// This allows you to continue parsing after deserialization is complete.
+    #[must_use]
+    pub fn into_parser(self) -> PhpParser<'de> {
+        self.parser
+    }
+
     fn deserialize_token<V>(&mut self, visitor: V, token: PhpToken<'de>) -> Result<V::Value, Error>
     where
         V: de::Visitor<'de>,
@@ -484,6 +501,7 @@ impl<'de> MapAccess<'de> for &'_ mut PhpDeserializer<'de> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PhpBstr;
     use serde::{Deserialize, Serialize};
     use std::{
         collections::{BTreeMap, HashMap},
@@ -1070,5 +1088,117 @@ mod tests {
         let mut deserializer = PhpDeserializer::new(&input[..]);
         let result: Message = Deserialize::deserialize(&mut deserializer).unwrap();
         assert_eq!(result, Message::Number(42));
+    }
+
+    #[test]
+    fn test_from_parser_and_into_parser() {
+        // Create a parser with a complex structure
+        let input = b"i:42;s:5:\"hello\";b:1;";
+        let mut parser = PhpParser::new(input);
+
+        // Parse the first token manually
+        let token = parser.next_token().unwrap().unwrap();
+        assert_eq!(token, PhpToken::Integer(42));
+
+        // Create a deserializer from the parser at its current position
+        let mut deserializer = PhpDeserializer::from_parser(parser);
+
+        // Deserialize the next item (a string)
+        let result: String = Deserialize::deserialize(&mut deserializer).unwrap();
+        assert_eq!(result, "hello");
+
+        // Get the parser back
+        let mut parser = deserializer.into_parser();
+
+        // Continue parsing with the parser
+        let token = parser.next_token().unwrap().unwrap();
+        assert_eq!(token, PhpToken::Boolean(true));
+
+        // Verify no more tokens
+        assert!(parser.next_token().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_partial_deserialization() {
+        // Create a data structure with multiple values
+        let input = b"a:3:{i:0;s:5:\"first\";i:1;s:6:\"second\";i:2;s:5:\"third\";}";
+        let mut parser = PhpParser::new(input);
+
+        // Skip the array opening token
+        let token = parser.next_token().unwrap().unwrap();
+        assert_eq!(token, PhpToken::Array { elements: 3 });
+
+        // Skip the first key
+        let token = parser.next_token().unwrap().unwrap();
+        assert_eq!(token, PhpToken::Integer(0));
+
+        // Create a deserializer from the parser at current position
+        let mut deserializer = PhpDeserializer::from_parser(parser);
+
+        // Deserialize the first value
+        let first_value: String = Deserialize::deserialize(&mut deserializer).unwrap();
+        assert_eq!(first_value, "first");
+
+        // Get the parser back
+        let mut parser = deserializer.into_parser();
+
+        // Skip the second key
+        let token = parser.next_token().unwrap().unwrap();
+        assert_eq!(token, PhpToken::Integer(1));
+
+        // Create another deserializer
+        let mut deserializer = PhpDeserializer::from_parser(parser);
+
+        // Deserialize the second value
+        let second_value: String = Deserialize::deserialize(&mut deserializer).unwrap();
+        assert_eq!(second_value, "second");
+
+        // Get the parser back again
+        let mut parser = deserializer.into_parser();
+
+        // Continue with manual parsing for the rest
+        let token = parser.next_token().unwrap().unwrap();
+        assert_eq!(token, PhpToken::Integer(2));
+
+        let token = parser.next_token().unwrap().unwrap();
+        assert_eq!(token, PhpToken::String(PhpBstr::new(b"third")));
+
+        let token = parser.next_token().unwrap().unwrap();
+        assert_eq!(token, PhpToken::End);
+
+        // Verify no more tokens
+        assert!(parser.next_token().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_nested_object_with_from_parser() {
+        // Create a nested object structure
+        let input = b"O:7:\"Example\":1:{s:4:\"user\";O:4:\"User\":2:{s:4:\"name\";s:5:\"Alice\";s:3:\"age\";i:30;}}";
+        let mut parser = PhpParser::new(input);
+
+        // Skip to the 'user' object
+        parser.next_token().unwrap(); // Skip outer object
+        parser.next_token().unwrap(); // Skip "user" string
+
+        // Create a deserializer from the parser at user object position
+        let mut deserializer = PhpDeserializer::from_parser(parser);
+
+        // Deserialize just the User object
+        let user: Person = Deserialize::deserialize(&mut deserializer).unwrap();
+
+        assert_eq!(
+            user,
+            Person {
+                name: "Alice".to_string(),
+                age: 30
+            }
+        );
+
+        // Get the parser back
+        let mut parser = deserializer.into_parser();
+        assert_eq!(parser.read_token().unwrap(), PhpToken::End);
+
+        // Verify we're at the end
+        assert_eq!(parser.position(), input.len());
     }
 }
