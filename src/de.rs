@@ -280,15 +280,137 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
         self,
         _name: &'static str,
         _variants: &'static [&'static str],
-        _visitor: V,
+        visitor: V,
     ) -> Result<V::Value, Self::Error>
     where
         V: de::Visitor<'de>,
     {
-        Err(Error::from(ErrorKind::Deserialize {
-            message: "PHP does not support enum deserialization".to_string(),
-            position: Some(self.parser.position()),
-        }))
+        struct EnumAccess<'a, 'de: 'a> {
+            de: &'a mut PhpDeserializer<'de>,
+        }
+
+        impl<'a, 'de> EnumAccess<'a, 'de> {
+            fn new(de: &'a mut PhpDeserializer<'de>) -> Self {
+                EnumAccess { de }
+            }
+        }
+
+        struct EnumDeserializer<'a, 'de: 'a> {
+            de: &'a mut PhpDeserializer<'de>,
+            token: PhpToken<'de>,
+        }
+
+        impl<'de> serde::Deserializer<'de> for EnumDeserializer<'_, 'de> {
+            type Error = Error;
+
+            fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+            where
+                V: de::Visitor<'de>,
+            {
+                match self.token {
+                    PhpToken::String(s) => {
+                        let str_value = s.to_str()?;
+                        visitor.visit_str(str_value)
+                    }
+                    _ => Err(Error::from(ErrorKind::Deserialize {
+                        message: "Expected string for enum variant".to_string(),
+                        position: Some(self.de.parser.position()),
+                    })),
+                }
+            }
+
+            fn deserialize_enum<V>(
+                self,
+                _name: &'static str,
+                _variants: &'static [&'static str],
+                visitor: V,
+            ) -> Result<V::Value, Self::Error>
+            where
+                V: de::Visitor<'de>,
+            {
+                self.deserialize_any(visitor)
+            }
+
+            fn deserialize_str<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+            where
+                V: de::Visitor<'de>,
+            {
+                self.deserialize_any(visitor)
+            }
+
+            // Forward all other methods to deserialize_any
+            serde::forward_to_deserialize_any! {
+                bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char string
+                bytes byte_buf option unit unit_struct newtype_struct seq tuple
+                tuple_struct map struct identifier ignored_any
+            }
+        }
+
+        impl<'de> de::EnumAccess<'de> for EnumAccess<'_, 'de> {
+            type Error = Error;
+            type Variant = Self;
+
+            fn variant_seed<V>(self, seed: V) -> Result<(V::Value, Self::Variant), Self::Error>
+            where
+                V: de::DeserializeSeed<'de>,
+            {
+                // Read the token first to determine what type it is
+                let token = self.de.parser.read_token()?;
+
+                // Create a deserializer that can convert the token to a string
+                let value_deserializer = EnumDeserializer { de: self.de, token };
+
+                let val = seed.deserialize(value_deserializer)?;
+                Ok((val, self))
+            }
+        }
+
+        impl<'de> de::VariantAccess<'de> for EnumAccess<'_, 'de> {
+            type Error = Error;
+
+            fn unit_variant(self) -> Result<(), Self::Error> {
+                Ok(())
+            }
+
+            fn newtype_variant_seed<T>(self, seed: T) -> Result<T::Value, Self::Error>
+            where
+                T: de::DeserializeSeed<'de>,
+            {
+                seed.deserialize(self.de)
+            }
+
+            fn tuple_variant<V>(self, _len: usize, visitor: V) -> Result<V::Value, Self::Error>
+            where
+                V: de::Visitor<'de>,
+            {
+                de::Deserializer::deserialize_seq(self.de, visitor)
+            }
+
+            fn struct_variant<V>(
+                self,
+                _fields: &'static [&'static str],
+                visitor: V,
+            ) -> Result<V::Value, Self::Error>
+            where
+                V: de::Visitor<'de>,
+            {
+                de::Deserializer::deserialize_map(self.de, visitor)
+            }
+        }
+
+        // Support multiple token types for enum variants
+        match self.parser.peek_token()? {
+            Some(
+                PhpTokenKind::String
+                | PhpTokenKind::Integer
+                | PhpTokenKind::Boolean
+                | PhpTokenKind::Array,
+            ) => visitor.visit_enum(EnumAccess::new(self)),
+            _ => Err(Error::from(ErrorKind::Deserialize {
+                message: "Expected tokekn for enum variant".to_string(),
+                position: Some(self.parser.position()),
+            })),
+        }
     }
 
     fn deserialize_identifier<V>(self, visitor: V) -> Result<V::Value, Self::Error>
@@ -362,7 +484,7 @@ impl<'de> MapAccess<'de> for &'_ mut PhpDeserializer<'de> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde::Deserialize;
+    use serde::{Deserialize, Serialize};
     use std::{
         collections::{BTreeMap, HashMap},
         fmt,
@@ -373,6 +495,35 @@ mod tests {
     struct Person {
         name: String,
         age: i32,
+    }
+
+    // Added enum definition for testing
+    #[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Copy)]
+    pub enum CoPower {
+        #[serde(rename = "N")]
+        None,
+        #[serde(rename = "Y")]
+        Power,
+        #[serde(rename = "S")]
+        SuperPower,
+    }
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Copy)]
+    pub enum NumberPower {
+        #[serde(rename = "0")]
+        None,
+        #[serde(rename = "1")]
+        Power,
+        #[serde(rename = "2")]
+        SuperPower,
+    }
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Copy)]
+    pub enum BinaryState {
+        #[serde(rename = "false")]
+        Off,
+        #[serde(rename = "true")]
+        On,
     }
 
     #[derive(Debug, PartialEq, Deserialize)]
@@ -471,10 +622,10 @@ mod tests {
 
     #[test]
     fn test_deserialize_float() {
-        let input = b"d:3.14;";
+        let input = b"d:3.33;";
         let mut deserializer = PhpDeserializer::new(&input[..]);
         let result: f64 = Deserialize::deserialize(&mut deserializer).unwrap();
-        assert_eq!(result, 3.14);
+        assert_eq!(result, 3.33);
     }
 
     #[test]
@@ -675,7 +826,7 @@ mod tests {
             {
                 struct ExplicitStrVisitor;
 
-                impl<'de> de::Visitor<'de> for ExplicitStrVisitor {
+                impl de::Visitor<'_> for ExplicitStrVisitor {
                     type Value = ExplicitStr;
 
                     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
@@ -713,7 +864,7 @@ mod tests {
             {
                 struct ExplicitStringVisitor;
 
-                impl<'de> de::Visitor<'de> for ExplicitStringVisitor {
+                impl de::Visitor<'_> for ExplicitStringVisitor {
                     type Value = ExplicitString;
 
                     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
@@ -750,7 +901,7 @@ mod tests {
             {
                 struct ExplicitStrVisitor;
 
-                impl<'de> de::Visitor<'de> for ExplicitStrVisitor {
+                impl de::Visitor<'_> for ExplicitStrVisitor {
                     type Value = ExplicitStr;
 
                     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
@@ -787,7 +938,7 @@ mod tests {
             {
                 struct ExplicitStrVisitor;
 
-                impl<'de> de::Visitor<'de> for ExplicitStrVisitor {
+                impl de::Visitor<'_> for ExplicitStrVisitor {
                     type Value = ExplicitStr;
 
                     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
@@ -826,7 +977,7 @@ mod tests {
             {
                 struct ExplicitBytesVisitor;
 
-                impl<'de> de::Visitor<'de> for ExplicitBytesVisitor {
+                impl de::Visitor<'_> for ExplicitBytesVisitor {
                     type Value = ExplicitBytes;
 
                     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
@@ -854,5 +1005,70 @@ mod tests {
             "Should succeed on deserialize_bytes with invalid UTF-8"
         );
         assert_eq!(result.unwrap(), ExplicitBytes(vec![0xFF, 0xFF, 0xFF, 0xFF]));
+    }
+
+    #[test]
+    fn test_deserialize_enum() {
+        // Test deserializing "N" to CoPower::None
+        let input = b"s:1:\"N\";";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: CoPower = Deserialize::deserialize(&mut deserializer).unwrap();
+        assert_eq!(result, CoPower::None);
+
+        // Test deserializing "Y" to CoPower::Power
+        let input = b"s:1:\"Y\";";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: CoPower = Deserialize::deserialize(&mut deserializer).unwrap();
+        assert_eq!(result, CoPower::Power);
+
+        // Test deserializing "S" to CoPower::SuperPower
+        let input = b"s:1:\"S\";";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: CoPower = Deserialize::deserialize(&mut deserializer).unwrap();
+        assert_eq!(result, CoPower::SuperPower);
+    }
+
+    #[test]
+    fn test_deserialize_enum_in_struct() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct Character {
+            name: String,
+            power: CoPower,
+        }
+
+        // PHP: array("name" => "Superman", "power" => "S")
+        let input = b"a:2:{s:4:\"name\";s:8:\"Superman\";s:5:\"power\";s:1:\"S\";}";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: Character = Deserialize::deserialize(&mut deserializer).unwrap();
+
+        assert_eq!(
+            result,
+            Character {
+                name: "Superman".to_string(),
+                power: CoPower::SuperPower,
+            }
+        );
+    }
+
+    #[test]
+    fn test_deserialize_external_tagged_enum() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        #[serde(tag = "type", content = "value")]
+        enum Message {
+            Text(String),
+            Number(i32),
+        }
+
+        // PHP: array("type" => "Text", "value" => "Hello")
+        let input = b"a:2:{s:4:\"type\";s:4:\"Text\";s:5:\"value\";s:5:\"Hello\";}";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: Message = Deserialize::deserialize(&mut deserializer).unwrap();
+        assert_eq!(result, Message::Text("Hello".to_string()));
+
+        // PHP: array("type" => "Number", "value" => 42)
+        let input = b"a:2:{s:4:\"type\";s:6:\"Number\";s:5:\"value\";i:42;}";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: Message = Deserialize::deserialize(&mut deserializer).unwrap();
+        assert_eq!(result, Message::Number(42));
     }
 }

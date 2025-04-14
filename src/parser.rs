@@ -551,7 +551,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case("d:3.14;", PhpToken::Float(3.14))]
+    #[case("d:3.33;", PhpToken::Float(3.33))]
     #[case("d:-0.5;", PhpToken::Float(-0.5))]
     #[case("d:0.0;", PhpToken::Float(0.0))]
     #[case("d:10000000000;", PhpToken::Float(1.0E10))]
