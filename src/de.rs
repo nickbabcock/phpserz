@@ -17,6 +17,26 @@ impl<'de> PhpDeserializer<'de> {
             parser: PhpParser::new(data),
         }
     }
+
+    fn deserialize_token<V>(&mut self, visitor: V, token: PhpToken<'de>) -> Result<V::Value, Error>
+    where
+        V: de::Visitor<'de>,
+    {
+        match token {
+            PhpToken::Null => visitor.visit_unit(),
+            PhpToken::Boolean(b) => visitor.visit_bool(b),
+            PhpToken::Integer(i) => visitor.visit_i64(i),
+            PhpToken::Float(f) => visitor.visit_f64(f),
+            PhpToken::String(s) => visitor.visit_borrowed_bytes(s.as_bytes()),
+            PhpToken::Array { .. } => visitor.visit_seq(self),
+            PhpToken::Object { .. } => visitor.visit_map(self),
+            PhpToken::Reference(r) => visitor.visit_i64(r),
+            _ => Err(Error::from(ErrorKind::Deserialize {
+                message: "Unexpected token".to_string(),
+                position: Some(self.parser.position()),
+            })),
+        }
+    }
 }
 
 impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
@@ -26,20 +46,8 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
     where
         V: de::Visitor<'de>,
     {
-        match self.parser.read_token()? {
-            PhpToken::Null => visitor.visit_unit(),
-            PhpToken::Boolean(b) => visitor.visit_bool(b),
-            PhpToken::Integer(i) => visitor.visit_i64(i),
-            PhpToken::Float(f) => visitor.visit_f64(f),
-            PhpToken::String(s) => visitor.visit_borrowed_bytes(s.as_bytes()),
-            PhpToken::Array { .. } => visitor.visit_seq(self),
-            PhpToken::Object { .. } => visitor.visit_map(self),
-            PhpToken::Reference(r) => visitor.visit_i64(r),
-            PhpToken::End => Err(Error::from(ErrorKind::Deserialize {
-                message: "Unexpected end token".to_string(),
-                position: Some(self.parser.position()),
-            })),
-        }
+        let token = self.parser.read_token()?;
+        self.deserialize_token(visitor, token)
     }
 
     fn deserialize_bool<V>(self, visitor: V) -> Result<V::Value, Self::Error>
@@ -123,14 +131,20 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
     where
         V: de::Visitor<'de>,
     {
-        self.deserialize_any(visitor)
+        self.deserialize_str(visitor)
     }
 
     fn deserialize_str<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: de::Visitor<'de>,
     {
-        self.deserialize_string(visitor)
+        match self.parser.read_token()? {
+            PhpToken::String(s) => {
+                let str_value = s.to_str()?;
+                visitor.visit_str(str_value)
+            }
+            token => self.deserialize_token(visitor, token),
+        }
     }
 
     fn deserialize_char<V>(self, visitor: V) -> Result<V::Value, Self::Error>
@@ -282,21 +296,11 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
         V: de::Visitor<'de>,
     {
         match self.parser.read_token()? {
-            PhpToken::Null => visitor.visit_unit(),
-            PhpToken::Boolean(b) => visitor.visit_bool(b),
-            PhpToken::Integer(i) => visitor.visit_i64(i),
-            PhpToken::Float(f) => visitor.visit_f64(f),
             PhpToken::String(s) => {
                 let (name, _) = s.to_property()?;
                 visitor.visit_borrowed_str(name)
             }
-            PhpToken::Array { .. } => visitor.visit_seq(self),
-            PhpToken::Object { .. } => visitor.visit_map(self),
-            PhpToken::Reference(r) => visitor.visit_i64(r),
-            PhpToken::End => Err(Error::from(ErrorKind::Deserialize {
-                message: "Unexpected end token".to_string(),
-                position: Some(self.parser.position()),
-            })),
+            token => self.deserialize_token(visitor, token),
         }
     }
 
@@ -656,5 +660,199 @@ mod tests {
                 }
             }
         );
+    }
+
+    #[test]
+    fn test_deserialize_str_explicitly() {
+        // Create a struct that explicitly calls deserialize_str
+        #[derive(Debug, PartialEq)]
+        struct ExplicitStr(String);
+
+        impl<'de> Deserialize<'de> for ExplicitStr {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct ExplicitStrVisitor;
+
+                impl<'de> de::Visitor<'de> for ExplicitStrVisitor {
+                    type Value = ExplicitStr;
+
+                    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                        formatter.write_str("a string")
+                    }
+
+                    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+                    where
+                        E: de::Error,
+                    {
+                        Ok(ExplicitStr(v.to_owned()))
+                    }
+                }
+
+                deserializer.deserialize_str(ExplicitStrVisitor)
+            }
+        }
+
+        let input = b"s:5:\"hello\";";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: ExplicitStr = Deserialize::deserialize(&mut deserializer).unwrap();
+        assert_eq!(result, ExplicitStr("hello".to_string()));
+    }
+
+    #[test]
+    fn test_deserialize_string_explicitly() {
+        // Create a struct that explicitly calls deserialize_string
+        #[derive(Debug, PartialEq)]
+        struct ExplicitString(String);
+
+        impl<'de> Deserialize<'de> for ExplicitString {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct ExplicitStringVisitor;
+
+                impl<'de> de::Visitor<'de> for ExplicitStringVisitor {
+                    type Value = ExplicitString;
+
+                    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                        formatter.write_str("a string")
+                    }
+
+                    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+                    where
+                        E: de::Error,
+                    {
+                        Ok(ExplicitString(v.to_owned()))
+                    }
+                }
+
+                deserializer.deserialize_string(ExplicitStringVisitor)
+            }
+        }
+
+        let input = b"s:5:\"hello\";";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: ExplicitString = Deserialize::deserialize(&mut deserializer).unwrap();
+        assert_eq!(result, ExplicitString("hello".to_string()));
+    }
+
+    #[test]
+    fn test_unicode_string() {
+        #[derive(Debug, PartialEq)]
+        struct ExplicitStr(String);
+
+        impl<'de> Deserialize<'de> for ExplicitStr {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct ExplicitStrVisitor;
+
+                impl<'de> de::Visitor<'de> for ExplicitStrVisitor {
+                    type Value = ExplicitStr;
+
+                    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                        formatter.write_str("a string")
+                    }
+
+                    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+                    where
+                        E: de::Error,
+                    {
+                        Ok(ExplicitStr(v.to_owned()))
+                    }
+                }
+
+                deserializer.deserialize_str(ExplicitStrVisitor)
+            }
+        }
+
+        let input = b"s:8:\"\xF0\x9F\x91\x8B\xF0\x9F\x8C\x8D\";"; // "👋🌍"
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: ExplicitStr = Deserialize::deserialize(&mut deserializer).unwrap();
+        assert_eq!(result, ExplicitStr("👋🌍".to_string()));
+    }
+
+    #[test]
+    fn test_invalid_utf8_string() {
+        #[derive(Debug, PartialEq)]
+        struct ExplicitStr(String);
+
+        impl<'de> Deserialize<'de> for ExplicitStr {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct ExplicitStrVisitor;
+
+                impl<'de> de::Visitor<'de> for ExplicitStrVisitor {
+                    type Value = ExplicitStr;
+
+                    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                        formatter.write_str("a string")
+                    }
+
+                    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+                    where
+                        E: de::Error,
+                    {
+                        Ok(ExplicitStr(v.to_owned()))
+                    }
+                }
+
+                deserializer.deserialize_str(ExplicitStrVisitor)
+            }
+        }
+
+        // Invalid UTF-8 sequence
+        let input = b"s:4:\"\xFF\xFF\xFF\xFF\";";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result = ExplicitStr::deserialize(&mut deserializer);
+        assert!(result.is_err(), "Should fail on invalid UTF-8");
+    }
+
+    #[test]
+    fn test_deserialize_string_comparison_with_bytes() {
+        // Create a struct that explicitly uses deserialize_bytes
+        #[derive(Debug, PartialEq)]
+        struct ExplicitBytes(Vec<u8>);
+
+        impl<'de> Deserialize<'de> for ExplicitBytes {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct ExplicitBytesVisitor;
+
+                impl<'de> de::Visitor<'de> for ExplicitBytesVisitor {
+                    type Value = ExplicitBytes;
+
+                    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                        formatter.write_str("bytes")
+                    }
+
+                    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+                    where
+                        E: de::Error,
+                    {
+                        Ok(ExplicitBytes(v.to_owned()))
+                    }
+                }
+
+                deserializer.deserialize_bytes(ExplicitBytesVisitor)
+            }
+        }
+
+        // This should work even with invalid UTF-8
+        let input = b"s:4:\"\xFF\xFF\xFF\xFF\";";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result = ExplicitBytes::deserialize(&mut deserializer);
+        assert!(
+            result.is_ok(),
+            "Should succeed on deserialize_bytes with invalid UTF-8"
+        );
+        assert_eq!(result.unwrap(), ExplicitBytes(vec![0xFF, 0xFF, 0xFF, 0xFF]));
     }
 }
