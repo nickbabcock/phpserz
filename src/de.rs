@@ -157,8 +157,11 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
     {
         match self.parser.read_token()? {
             PhpToken::String(s) => {
-                let str_value = s.to_str()?;
-                visitor.visit_str(str_value)
+                if let Ok(str_value) = s.to_str() {
+                    visitor.visit_borrowed_str(str_value)
+                } else {
+                    visitor.visit_borrowed_bytes(s.as_bytes())
+                }
             }
             token => self.deserialize_token(visitor, token),
         }
@@ -1023,6 +1026,30 @@ mod tests {
             "Should succeed on deserialize_bytes with invalid UTF-8"
         );
         assert_eq!(result.unwrap(), ExplicitBytes(vec![0xFF, 0xFF, 0xFF, 0xFF]));
+    }
+
+    #[test]
+    fn test_deserialize_borrowed_str() {
+        let input = b"s:5:\"hello\";";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: &str = Deserialize::deserialize(&mut deserializer).unwrap();
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_deserialize_borrowed_bytes_fallback() {
+        // Test with invalid UTF-8
+        let input = b"s:4:\"\xFF\xFF\xFF\xFF\";";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+
+        let result: &[u8] = Deserialize::deserialize(&mut deserializer).unwrap();
+        assert_eq!(result, &[0xFF, 0xFF, 0xFF, 0xFF][..]);
+
+        // Test with valid UTF-8 too
+        let input = b"s:5:\"hello\";";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: &[u8] = Deserialize::deserialize(&mut deserializer).unwrap();
+        assert_eq!(result, b"hello");
     }
 
     #[test]
