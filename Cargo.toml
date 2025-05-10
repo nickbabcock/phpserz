@@ -1,6 +1,6 @@
 [package]
 name = "phpserz"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 authors = ["Nick Babcock <nbabcock19@hotmail.com>"]
 description = "A PHP serialization format parser and deserializer"
