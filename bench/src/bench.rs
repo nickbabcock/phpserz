@@ -1,4 +1,5 @@
-use criterion::{black_box, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
+use criterion::{BenchmarkId, Criterion, Throughput};
 
 fn parser(c: &mut Criterion) {
     let awbw = include_bytes!("../../assets/corpus/awbw.txt");
