@@ -427,7 +427,7 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
                 | PhpTokenKind::Array,
             ) => visitor.visit_enum(EnumAccess::new(self)),
             _ => Err(Error::from(ErrorKind::Deserialize {
-                message: "Expected tokekn for enum variant".to_string(),
+                message: "Expected token for enum variant".to_string(),
                 position: Some(self.parser.position()),
             })),
         }
