@@ -386,7 +386,7 @@ enum ScalarError {
 }
 
 #[inline]
-fn read_str(data: &[u8]) -> Result<(PhpBstr, &[u8]), ScalarError> {
+fn read_str(data: &[u8]) -> Result<(PhpBstr<'_>, &[u8]), ScalarError> {
     let (len, data) = read_u32(data, b':')?;
     let len = len as usize;
     let Some((contents, rest)) = data.split_at_checked(len + 2) else {
