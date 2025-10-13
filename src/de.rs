@@ -529,29 +529,6 @@ mod tests {
         SuperPower,
     }
 
-    #[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Copy)]
-    pub enum NumberPower {
-        #[serde(rename = "0")]
-        None,
-        #[serde(rename = "1")]
-        Power,
-        #[serde(rename = "2")]
-        SuperPower,
-    }
-
-    #[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Copy)]
-    pub enum BinaryState {
-        #[serde(rename = "false")]
-        Off,
-        #[serde(rename = "true")]
-        On,
-    }
-
-    #[derive(Debug, PartialEq, Deserialize)]
-    struct Data {
-        value: Option<String>,
-    }
-
     #[derive(Debug, PartialEq, Deserialize)]
     struct ObjectWrapper {
         inner: Person,
