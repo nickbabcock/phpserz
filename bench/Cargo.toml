@@ -20,7 +20,7 @@ harness = false
 path = "src/bench.rs"
 
 [dependencies]
-criterion = "0.6.0"
+criterion = "0.7.0"
 phpserz = { path = ".." }
 
 [profile.release]

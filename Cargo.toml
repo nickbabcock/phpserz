@@ -21,4 +21,4 @@ default = ["serde"]
 serde = ["dep:serde"]
 
 [dev-dependencies]
-rstest = "0.25.0"
+rstest = "0.26.1"
