@@ -1,3 +1,7 @@
+## v0.2.2 - October 14th 2025
+
+- Remove dependence on serde derive feature
+
 ## v0.2.1 - May 10th 2025
 
 - Add borrowed string and bytes deserialization
