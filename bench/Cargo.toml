@@ -22,6 +22,7 @@ path = "src/bench.rs"
 [dependencies]
 criterion = "0.7.0"
 phpserz = { path = ".." }
+serde = { version = "1.0", features = ["derive"] }
 
 [profile.release]
 debug = true
