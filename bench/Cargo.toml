@@ -15,14 +15,22 @@ edition = "2021"
 bench = false
 
 [[bench]]
-name = "phpserz-bench"
+name = "phpserz-bench-criterion"
 harness = false
-path = "src/bench.rs"
+path = "src/criterion_main.rs"
+
+[[bench]]
+name = "phpserz-bench-gungraun"
+harness = false
+path = "src/gungraun_main.rs"
 
 [dependencies]
 criterion = "0.7.0"
 phpserz = { path = ".." }
 serde = { version = "1.0", features = ["derive"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+gungraun = "0.17.2"
 
 [profile.release]
 debug = true
