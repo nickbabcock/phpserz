@@ -1,6 +1,5 @@
-use criterion::{BenchmarkId, Criterion, Throughput};
 use serde::Deserialize;
-use std::{collections::BTreeMap, hint::black_box};
+use std::collections::BTreeMap;
 
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
@@ -122,50 +121,40 @@ struct UnitPayload {
     carried: String,
 }
 
-fn parser(c: &mut Criterion) {
-    let awbw = include_bytes!("../../assets/corpus/awbw.txt");
-    let mut group = c.benchmark_group("parser");
-    group.throughput(Throughput::Bytes(awbw.len() as u64));
-    group.bench_function(BenchmarkId::from_parameter("awbw"), |b| {
-        b.iter(|| {
-            let mut parser = phpserz::PhpParser::new(awbw.as_slice());
-            let mut count = 0;
-            while let Ok(Some(_)) = parser.next_token() {
-                count += 1;
-            }
-            black_box(count);
-        });
-    });
+pub mod criterion_benches {
+    use super::*;
+    use criterion::{BenchmarkId, Criterion, Throughput};
+    use std::hint::black_box;
 
-    let sensors = include_bytes!("../../assets/corpus/sensors.txt");
-    group.throughput(Throughput::Bytes(sensors.len() as u64));
-    group.bench_function(BenchmarkId::from_parameter("sensors"), |b| {
-        b.iter(|| {
-            let mut parser = phpserz::PhpParser::new(sensors.as_slice());
-            let mut count = 0;
-            while let Ok(Some(_)) = parser.next_token() {
-                count += 1;
-            }
-            black_box(count);
+    fn deserializer(c: &mut Criterion) {
+        let awbw = include_bytes!("../../../assets/corpus/awbw.txt");
+        let mut group = c.benchmark_group("deserializer");
+        group.throughput(Throughput::Bytes(awbw.len() as u64));
+        group.bench_function(BenchmarkId::from_parameter("game-awbw"), |b| {
+            b.iter(|| {
+                let mut deserializer = phpserz::PhpDeserializer::new(awbw.as_slice());
+                let game: GamePayload = Deserialize::deserialize(&mut deserializer)
+                    .expect("to deserialize game payload");
+                black_box(game);
+            });
         });
-    });
-    group.finish();
+        group.finish();
+    }
+
+    criterion::criterion_group!(deserializer_benches, deserializer);
 }
 
-fn deserializer(c: &mut Criterion) {
-    let awbw = include_bytes!("../../assets/corpus/awbw.txt");
-    let mut group = c.benchmark_group("deserializer");
-    group.throughput(Throughput::Bytes(awbw.len() as u64));
-    group.bench_function(BenchmarkId::from_parameter("game-awbw"), |b| {
-        b.iter(|| {
-            let mut deserializer = phpserz::PhpDeserializer::new(awbw.as_slice());
-            let game: GamePayload =
-                Deserialize::deserialize(&mut deserializer).expect("to deserialize game payload");
-            black_box(game);
-        });
-    });
-    group.finish();
-}
+#[cfg(not(target_family = "wasm"))]
+pub mod gungraun_benches {
+    use super::*;
+    use gungraun::{library_benchmark, library_benchmark_group};
 
-criterion::criterion_group!(benches, parser, deserializer);
-criterion::criterion_main!(benches);
+    #[library_benchmark]
+    #[bench::game_awbw(include_bytes!("../../../assets/corpus/awbw.txt").as_slice())]
+    fn deserialize_game(data: &[u8]) -> GamePayload {
+        let mut deserializer = phpserz::PhpDeserializer::new(data);
+        Deserialize::deserialize(&mut deserializer).expect("to deserialize game payload")
+    }
+
+    library_benchmark_group!(name = deserializer_benches, benchmarks = [deserialize_game,]);
+}

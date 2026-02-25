@@ -103,8 +103,10 @@ jobs:
       uses: dtolnay/rust-toolchain@master
       with:
         toolchain: stable
-    - name: Build benchmark
-      run: cargo bench --manifest-path bench/Cargo.toml -- --test
+    - name: Build benchmark (criterion)
+      run: cargo bench --manifest-path bench/Cargo.toml --bench phpserz-bench-criterion -- --test
+    - name: Build benchmark (gungraun)
+      run: cargo bench --manifest-path bench/Cargo.toml --bench phpserz-bench-gungraun --no-run
 
   # Check that all files are formatted properly.
   rustfmt:
