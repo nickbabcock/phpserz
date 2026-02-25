@@ -45,8 +45,14 @@ impl<'de> PhpDeserializer<'de> {
             PhpToken::Integer(i) => visitor.visit_i64(i),
             PhpToken::Float(f) => visitor.visit_f64(f),
             PhpToken::String(s) => visitor.visit_borrowed_bytes(s.as_bytes()),
-            PhpToken::Array { .. } => visitor.visit_seq(self),
-            PhpToken::Object { .. } => visitor.visit_map(self),
+            PhpToken::Array { elements } => visitor.visit_seq(PhpSeqAccess {
+                de: self,
+                remaining: elements,
+            }),
+            PhpToken::Object { properties, .. } => visitor.visit_map(PhpMapAccess {
+                de: self,
+                remaining: properties,
+            }),
             PhpToken::Reference(r) => visitor.visit_i64(r),
             _ => Err(Error::from(ErrorKind::Deserialize {
                 message: "Unexpected token".to_string(),
@@ -246,7 +252,10 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
     {
         match self.parser.next_token()? {
             Some(PhpToken::Array { elements }) if (elements as usize) == len => {
-                visitor.visit_seq(self)
+                visitor.visit_seq(PhpSeqAccess {
+                    de: self,
+                    remaining: elements,
+                })
             }
             Some(PhpToken::Array { .. }) => Err(Error::from(ErrorKind::Deserialize {
                 message: "Array length mismatch".to_string(),
@@ -276,7 +285,14 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
         V: de::Visitor<'de>,
     {
         match self.parser.read_token()? {
-            PhpToken::Array { .. } | PhpToken::Object { .. } => visitor.visit_map(self),
+            PhpToken::Array { elements } => visitor.visit_map(PhpMapAccess {
+                de: self,
+                remaining: elements,
+            }),
+            PhpToken::Object { properties, .. } => visitor.visit_map(PhpMapAccess {
+                de: self,
+                remaining: properties,
+            }),
             _ => Err(Error::from(ErrorKind::Deserialize {
                 message: "Expected array or object".to_string(),
                 position: Some(self.parser.position()),
@@ -439,8 +455,8 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
     {
         match self.parser.read_token()? {
             PhpToken::String(s) => {
-                let (name, _) = s.to_property()?;
-                visitor.visit_borrowed_str(name)
+                let prop = s.to_property();
+                visitor.visit_bytes(prop.as_bytes())
             }
             token => self.deserialize_token(visitor, token),
         }
@@ -454,50 +470,66 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
     }
 }
 
-impl<'de> SeqAccess<'de> for &'_ mut PhpDeserializer<'de> {
+struct PhpSeqAccess<'a, 'de: 'a> {
+    de: &'a mut PhpDeserializer<'de>,
+    remaining: u32,
+}
+
+impl<'de> SeqAccess<'de> for PhpSeqAccess<'_, 'de> {
     type Error = Error;
 
     fn next_element_seed<T>(&mut self, seed: T) -> Result<Option<T::Value>, Self::Error>
     where
         T: DeserializeSeed<'de>,
     {
-        let peeked = self
-            .parser
-            .peek_token()?
-            .ok_or_else(|| Error::from(ErrorKind::Eof))?;
-        if matches!(peeked, PhpTokenKind::End) {
-            self.parser.consume_lookahead();
-            return Ok(None);
+        if self.remaining == 0 {
+            match self.de.parser.read_token()? {
+                PhpToken::End => return Ok(None),
+                _ => {
+                    return Err(Error::from(ErrorKind::Deserialize {
+                        message: "Expected end of sequence".to_string(),
+                        position: Some(self.de.parser.position()),
+                    }));
+                }
+            }
         }
-
-        seed.deserialize(&mut **self).map(Some)
+        self.remaining -= 1;
+        seed.deserialize(&mut *self.de).map(Some)
     }
 }
 
-impl<'de> MapAccess<'de> for &'_ mut PhpDeserializer<'de> {
+struct PhpMapAccess<'a, 'de: 'a> {
+    de: &'a mut PhpDeserializer<'de>,
+    remaining: u32,
+}
+
+impl<'de> MapAccess<'de> for PhpMapAccess<'_, 'de> {
     type Error = Error;
 
     fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, Self::Error>
     where
         K: DeserializeSeed<'de>,
     {
-        let peeked = self
-            .parser
-            .peek_token()?
-            .ok_or_else(|| Error::from(ErrorKind::Eof))?;
-        if matches!(peeked, PhpTokenKind::End) {
-            self.parser.consume_lookahead();
-            return Ok(None);
+        if self.remaining == 0 {
+            match self.de.parser.read_token()? {
+                PhpToken::End => return Ok(None),
+                _ => {
+                    return Err(Error::from(ErrorKind::Deserialize {
+                        message: "Expected end of map".to_string(),
+                        position: Some(self.de.parser.position()),
+                    }));
+                }
+            }
         }
-
-        seed.deserialize(&mut **self).map(Some)
+        self.remaining -= 1;
+        seed.deserialize(&mut *self.de).map(Some)
     }
 
     fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value, Self::Error>
     where
         V: DeserializeSeed<'de>,
     {
-        seed.deserialize(&mut **self)
+        seed.deserialize(&mut *self.de)
     }
 }
 

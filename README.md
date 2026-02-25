@@ -117,9 +117,9 @@ let PhpToken::String(prop) = parser.read_token().unwrap() else {
 };
 
 assert_eq!(prop, PhpBstr::new(b"name"));
-let (name, visibility) = prop.to_property().unwrap();
-assert_eq!(name, "name");
-assert_eq!(visibility, PhpVisibility::Public);
+let prop = prop.to_property();
+assert_eq!(prop.to_str().unwrap(), "name");
+assert_eq!(prop.visibility(), PhpVisibility::Public);
 
 // ...
 ```

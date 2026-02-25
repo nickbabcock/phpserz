@@ -34,11 +34,7 @@ impl<'a> PhpBstr<'a> {
     /// > Private properties are prefixed with `\0ClassName\0` and protected properties with `\0*\0`.
     ///
     /// Source: <https://www.phpinternalsbook.com/php5/classes_objects/serialization.html>
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if the byte string is not a valid UTF-8.
-    pub fn to_property(self) -> Result<(&'a str, PhpVisibility), Error> {
+    pub fn to_property(self) -> PhpProperty<'a> {
         let (data, visibility) = match self.data {
             [0, b'*', 0, contents @ ..] => (contents, PhpVisibility::Protected),
             [0, tail @ ..] => {
@@ -54,8 +50,10 @@ impl<'a> PhpBstr<'a> {
             _ => (self.data, PhpVisibility::Public),
         };
 
-        let result = std::str::from_utf8(data).map_err(|e| Error::from(ErrorKind::Utf8(e)))?;
-        Ok((result, visibility))
+        PhpProperty {
+            name: data,
+            visibility,
+        }
     }
 }
 
@@ -65,6 +63,33 @@ pub enum PhpVisibility {
     Public,
     Protected,
     Private,
+}
+
+/// A PHP object property with its name and visibility.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub struct PhpProperty<'a> {
+    name: &'a [u8],
+    visibility: PhpVisibility,
+}
+
+impl<'a> PhpProperty<'a> {
+    /// Get the underlying bytes of the property name.
+    #[inline]
+    pub const fn as_bytes(&self) -> &'a [u8] {
+        self.name
+    }
+
+    /// Convert the property name to a string.
+    #[inline]
+    pub fn to_str(self) -> Result<&'a str, Error> {
+        std::str::from_utf8(self.name).map_err(|e| Error::from(ErrorKind::Utf8(e)))
+    }
+
+    /// Get the visibility of the property.
+    #[inline]
+    pub const fn visibility(&self) -> PhpVisibility {
+        self.visibility
+    }
 }
 
 /// A token in the PHP serialized format.
@@ -116,8 +141,9 @@ pub enum PhpTokenKind {
 #[derive(Debug)]
 pub struct PhpParser<'a> {
     data: &'a [u8],
+    // stores data_len at the time of the peek, not position
     lookahead: Option<(PhpTokenKind, usize)>,
-    position: usize,
+    original_len: usize,
 }
 
 impl<'a> PhpParser<'a> {
@@ -125,16 +151,23 @@ impl<'a> PhpParser<'a> {
     #[must_use]
     pub const fn new(data: &'a [u8]) -> Self {
         Self {
+            original_len: data.len(),
             data,
             lookahead: None,
-            position: 0,
         }
     }
 
     /// Get the current position of the parser.
+    ///
+    /// Returns the number of bytes consumed so far, accounting for lookahead.
     #[must_use]
-    pub const fn position(&self) -> usize {
-        self.position
+    pub fn position(&self) -> usize {
+        let consumed = self.original_len - self.data.len();
+        if let Some((_, data_len)) = self.lookahead {
+            self.original_len - data_len
+        } else {
+            consumed
+        }
     }
 
     #[inline]
@@ -148,25 +181,22 @@ impl<'a> PhpParser<'a> {
             return Err(Error::from(ErrorKind::MismatchByte {
                 expected,
                 found: c,
-                position: self.position,
+                position: self.position(),
             }));
         }
 
-        self.position += 1;
         self.data = rest;
         Ok(())
     }
 
     #[inline]
-    fn read_next(&mut self) -> Result<Option<(PhpTokenKind, usize)>, Error> {
-        let mut current_position = self.position;
+    fn read_next(&mut self) -> Result<Option<PhpTokenKind>, Error> {
         loop {
             let Some((&c, rest)) = self.data.split_first() else {
                 return Ok(None);
             };
 
             self.data = rest;
-            current_position += 1;
             let kind = match c {
                 b'N' => PhpTokenKind::Null,
                 b'b' => PhpTokenKind::Boolean,
@@ -181,19 +211,12 @@ impl<'a> PhpParser<'a> {
                 _ => {
                     return Err(Error::from(ErrorKind::UnexpectedByte {
                         found: c,
-                        position: self.position,
+                        position: self.position(),
                     }));
                 }
             };
 
-            return Ok(Some((kind, current_position)));
-        }
-    }
-
-    #[cfg_attr(not(feature = "serde"), allow(dead_code))]
-    pub(crate) const fn consume_lookahead(&mut self) {
-        if let Some((_, position)) = self.lookahead.take() {
-            self.position = position;
+            return Ok(Some(kind));
         }
     }
 
@@ -214,9 +237,10 @@ impl<'a> PhpParser<'a> {
             return Ok(Some(token));
         }
 
+        let data_len = self.data.len();
         match self.read_next() {
-            Ok(Some((token, position))) => {
-                self.lookahead = Some((token, position));
+            Ok(Some(token)) => {
+                self.lookahead = Some((token, data_len));
                 Ok(Some(token))
             }
             Ok(None) => Ok(None),
@@ -240,15 +264,13 @@ impl<'a> PhpParser<'a> {
     /// ```
     #[inline]
     pub fn next_token(&mut self) -> Result<Option<PhpToken<'a>>, Error> {
-        let (kind, position) = match self.lookahead.take() {
-            Some((kind, position)) => (kind, position),
+        let kind = match self.lookahead.take() {
+            Some((kind, _)) => kind,
             None => match self.read_next()? {
-                Some((kind, position)) => (kind, position),
+                Some(kind) => kind,
                 None => return Ok(None),
             },
         };
-
-        self.position = position;
 
         match kind {
             PhpTokenKind::End => Ok(Some(PhpToken::End)),
@@ -270,22 +292,19 @@ impl<'a> PhpParser<'a> {
                     _ => {
                         return Err(Error::from(ErrorKind::UnexpectedByte {
                             found: c,
-                            position: self.position,
+                            position: self.position(),
                         }));
                     }
                 };
 
                 self.data = rest;
-                self.position += 1;
                 self.expect(b';')?;
                 Ok(Some(token))
             }
             PhpTokenKind::Integer => {
                 self.expect(b':')?;
                 let (int, rest) = to_i64(self.data).map_err(|e| self.map_error(e))?;
-                let bytes_read = self.data.len() - rest.len();
                 self.data = rest;
-                self.position += bytes_read;
                 Ok(Some(PhpToken::Integer(int)))
             }
             PhpTokenKind::Float => {
@@ -293,11 +312,10 @@ impl<'a> PhpParser<'a> {
 
                 let (num, len) = fast_float2::parse_partial(self.data).map_err(|_| {
                     Error::from(ErrorKind::InvalidNumber {
-                        position: self.position,
+                        position: self.position(),
                     })
                 })?;
 
-                self.position += len;
                 self.data = &self.data[len..];
                 self.expect(b';')?;
                 Ok(Some(PhpToken::Float(num)))
@@ -305,8 +323,6 @@ impl<'a> PhpParser<'a> {
             PhpTokenKind::String => {
                 self.expect(b':')?;
                 let (s, rest) = read_str(self.data).map_err(|e| self.map_error(e))?;
-                let bytes_read = self.data.len() - rest.len();
-                self.position += bytes_read;
                 self.data = rest;
                 self.expect(b';')?;
                 Ok(Some(PhpToken::String(s)))
@@ -314,8 +330,6 @@ impl<'a> PhpParser<'a> {
             PhpTokenKind::Array => {
                 self.expect(b':')?;
                 let (elements, rest) = read_u32(self.data, b':').map_err(|e| self.map_error(e))?;
-                let bytes_read = self.data.len() - rest.len();
-                self.position += bytes_read;
                 self.data = rest;
                 self.expect(b'{')?;
                 Ok(Some(PhpToken::Array { elements }))
@@ -323,15 +337,11 @@ impl<'a> PhpParser<'a> {
             PhpTokenKind::Object => {
                 self.expect(b':')?;
                 let (class, rest) = read_str(self.data).map_err(|e| self.map_error(e))?;
-                let bytes_read = self.data.len() - rest.len();
-                self.position += bytes_read;
                 self.data = rest;
                 self.expect(b':')?;
 
                 let (properties, rest) =
                     read_u32(self.data, b':').map_err(|e| self.map_error(e))?;
-                let bytes_read = self.data.len() - rest.len();
-                self.position += bytes_read;
                 self.data = rest;
                 self.expect(b'{')?;
 
@@ -340,8 +350,7 @@ impl<'a> PhpParser<'a> {
             PhpTokenKind::Reference => {
                 self.expect(b':')?;
                 let (int, rest) = to_i64(self.data).map_err(|e| self.map_error(e))?;
-                let bytes_read = self.data.len() - rest.len();
-                self.position += bytes_read;
+                self.data = rest;
                 Ok(Some(PhpToken::Reference(int)))
             }
         }
@@ -351,23 +360,23 @@ impl<'a> PhpParser<'a> {
     fn map_error(&self, error: ScalarError) -> Error {
         match error {
             ScalarError::StringTooLong => (ErrorKind::StringTooLong {
-                position: self.position,
+                position: self.position(),
             })
             .into(),
             ScalarError::MissingQuotes => (ErrorKind::MissingQuotes {
-                position: self.position,
+                position: self.position(),
             })
             .into(),
             ScalarError::Empty => (ErrorKind::Empty {
-                position: self.position,
+                position: self.position(),
             })
             .into(),
             ScalarError::Overflow => (ErrorKind::Overflow {
-                position: self.position,
+                position: self.position(),
             })
             .into(),
             ScalarError::Invalid => (ErrorKind::InvalidNumber {
-                position: self.position,
+                position: self.position(),
             })
             .into(),
             ScalarError::Eof => ErrorKind::Eof.into(),
@@ -513,15 +522,19 @@ mod tests {
             assert!(
                 token_index < expected_tokens.len(),
                 "Unexpected extra token at position {}",
-                parser.position
+                parser.position()
             );
 
             // Check if the token matches what we expect
             let expected_token = &expected_tokens[token_index];
             assert_eq!(
-                &actual_token, expected_token,
+                &actual_token,
+                expected_token,
                 "Token mismatch at position {}: expected {:?}, got {:?} at position {}",
-                token_index, expected_token, actual_token, parser.position
+                token_index,
+                expected_token,
+                actual_token,
+                parser.position()
             );
 
             token_index += 1;
@@ -617,7 +630,8 @@ mod tests {
             panic!("Expected a string token");
         };
 
-        assert_eq!(bstr.to_property().unwrap(), expected);
+        let prop = bstr.to_property();
+        assert_eq!((prop.to_str().unwrap(), prop.visibility()), expected);
     }
 
     #[test]
@@ -825,8 +839,8 @@ mod tests {
     #[rstest]
     #[case(b"r:;")]
     #[case(b"r:xyz;")]
-    #[case(b"r:9999999999;")]
-    #[case(b"r:-9999999999;")]
+    #[case(b"r:9223372036854775808;")]
+    #[case(b"r:-9223372036854775809;")]
     fn test_invalid_reference(#[case] input: &[u8]) {
         assert!(
             error_case(input).is_err(),
@@ -911,46 +925,6 @@ mod tests {
             17,
             "Position after parsing full input should be 17"
         );
-    }
-
-    #[test]
-    fn test_position_with_consume_lookahead() {
-        let input = b"N;a:0:{}";
-        let mut parser = PhpParser::new(input);
-
-        // Peek the null token
-        let token_kind = parser.peek_token().unwrap().unwrap();
-        assert_eq!(token_kind, PhpTokenKind::Null);
-        assert_eq!(
-            parser.position(),
-            0,
-            "Position should not change after peeking"
-        );
-
-        // Consume the lookahead
-        parser.consume_lookahead();
-        assert_eq!(
-            parser.position(),
-            1,
-            "Position should update to token position after consume_lookahead"
-        );
-
-        // Read the null token
-        assert_eq!(parser.data[0], b';');
-        parser.expect(b';').unwrap();
-
-        // Peek at array token
-        let token_kind = parser.peek_token().unwrap().unwrap();
-        assert_eq!(token_kind, PhpTokenKind::Array);
-
-        // Read array token
-        let token = parser.next_token().unwrap().unwrap();
-        assert_eq!(token, PhpToken::Array { elements: 0 });
-        let token_kind = parser.peek_token().unwrap().unwrap();
-        assert_eq!(token_kind, PhpTokenKind::End);
-        parser.consume_lookahead();
-
-        assert_eq!(parser.next_token().unwrap(), None);
     }
 
     #[test]
@@ -1115,9 +1089,9 @@ mod tests {
         };
 
         assert_eq!(prop, PhpBstr::new(b"name"));
-        let (name, visibility) = prop.to_property()?;
-        assert_eq!(name, "name");
-        assert_eq!(visibility, PhpVisibility::Public);
+        let prop = prop.to_property();
+        assert_eq!(prop.to_str()?, "name");
+        assert_eq!(prop.visibility(), PhpVisibility::Public);
 
         Ok(())
     }
