@@ -261,8 +261,8 @@ impl<'a> PhpParser<'a> {
     /// Reads the next token, and will error if the end of the input is reached.
     #[inline]
     pub fn read_token(&mut self) -> Result<PhpToken<'a>, Error> {
-        let token = self.next_token()?;
-        Ok(token.ok_or(ErrorKind::Eof)?)
+        let kind = self.read_next()?.ok_or(ErrorKind::Eof)?;
+        self.parse_token_body(kind)
     }
 
     /// Attempt to read the next token. Will return Ok(None) if the end of the input is reached.
@@ -279,11 +279,16 @@ impl<'a> PhpParser<'a> {
             None => return Ok(None),
         };
 
+        self.parse_token_body(kind).map(Some)
+    }
+
+    #[inline]
+    fn parse_token_body(&mut self, kind: PhpTokenKind) -> Result<PhpToken<'a>, Error> {
         match kind {
-            PhpTokenKind::End => Ok(Some(PhpToken::End)),
+            PhpTokenKind::End => Ok(PhpToken::End),
             PhpTokenKind::Null => {
                 self.expect(b';')?;
-                Ok(Some(PhpToken::Null))
+                Ok(PhpToken::Null)
             }
             PhpTokenKind::Boolean => {
                 self.expect(b':')?;
@@ -306,13 +311,13 @@ impl<'a> PhpParser<'a> {
 
                 self.data = rest;
                 self.expect(b';')?;
-                Ok(Some(token))
+                Ok(token)
             }
             PhpTokenKind::Integer => {
                 self.expect(b':')?;
                 let (int, rest) = to_i64(self.data).map_err(|e| self.map_error(e))?;
                 self.data = rest;
-                Ok(Some(PhpToken::Integer(int)))
+                Ok(PhpToken::Integer(int))
             }
             PhpTokenKind::Float => {
                 self.expect(b':')?;
@@ -325,21 +330,21 @@ impl<'a> PhpParser<'a> {
 
                 self.data = &self.data[len..];
                 self.expect(b';')?;
-                Ok(Some(PhpToken::Float(num)))
+                Ok(PhpToken::Float(num))
             }
             PhpTokenKind::String => {
                 self.expect(b':')?;
                 let (s, rest) = read_str(self.data).map_err(|e| self.map_error(e))?;
                 self.data = rest;
                 self.expect(b';')?;
-                Ok(Some(PhpToken::String(s)))
+                Ok(PhpToken::String(s))
             }
             PhpTokenKind::Array => {
                 self.expect(b':')?;
                 let (elements, rest) = read_u32(self.data, b':').map_err(|e| self.map_error(e))?;
                 self.data = rest;
                 self.expect(b'{')?;
-                Ok(Some(PhpToken::Array { elements }))
+                Ok(PhpToken::Array { elements })
             }
             PhpTokenKind::Object => {
                 self.expect(b':')?;
@@ -352,14 +357,113 @@ impl<'a> PhpParser<'a> {
                 self.data = rest;
                 self.expect(b'{')?;
 
-                Ok(Some(PhpToken::Object { class, properties }))
+                Ok(PhpToken::Object { class, properties })
             }
             PhpTokenKind::Reference => {
                 self.expect(b':')?;
                 let (int, rest) = to_i64(self.data).map_err(|e| self.map_error(e))?;
                 self.data = rest;
-                Ok(Some(PhpToken::Reference(int)))
+                Ok(PhpToken::Reference(int))
             }
+        }
+    }
+
+    /// Try to read the next token as a string up to 99 characters long
+    #[inline]
+    pub(crate) fn try_read_str(&mut self) -> Option<PhpBstr<'a>> {
+        let data = self.data;
+        let d = data.get(..16)?;
+        if d[0] != b's' || d[1] != b':' || !d[2].is_ascii_digit() {
+            return None;
+        }
+
+        if d[3] == b':' {
+            let len = usize::from(d[2] - b'0');
+            let end = 5 + len;
+            if d[4] != b'"' || d[end] != b'"' || d[end + 1] != b';' {
+                return None;
+            }
+
+            self.data = &data[end + 2..];
+            return Some(PhpBstr::new(&d[5..end]));
+        }
+
+        if d[4] != b':' || !d[3].is_ascii_digit() || d[5] != b'"' {
+            return None;
+        }
+
+        let len = usize::from(d[2] - b'0') * 10 + usize::from(d[3] - b'0');
+        let end = 6 + len;
+        let (s, rest) = data.split_at_checked(end + 2)?;
+        if s[end] != b'"' || s[end + 1] != b';' {
+            return None;
+        }
+
+        self.data = rest;
+        Some(PhpBstr::new(&s[6..end]))
+    }
+
+    /// Try to consume an end token (`}`). Returns true if consumed.
+    #[inline]
+    pub(crate) fn try_read_end(&mut self) -> bool {
+        match self.data {
+            [b'}', rest @ ..] => {
+                self.data = rest;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Try to read the next token as an integer.
+    #[inline]
+    pub(crate) fn try_read_i64(&mut self) -> Option<i64> {
+        let data = self.data;
+        match data {
+            [b'i', b':', rest @ ..] => {
+                let (int, data) = to_i64(rest).ok()?;
+                self.data = data;
+                Some(int)
+            }
+            _ => None,
+        }
+    }
+
+    /// Try to read the next token as a float.
+    #[inline]
+    pub(crate) fn try_read_f64(&mut self) -> Option<f64> {
+        let data = self.data;
+        match data {
+            [b'd', b':', rest @ ..] => {
+                let (float, len) = fast_float2::parse_partial(rest).ok()?;
+                let (tail, rest) = rest[len..].split_first()?;
+                if tail != &b';' {
+                    return None;
+                }
+
+                self.data = rest;
+                Some(float)
+            }
+            _ => None,
+        }
+    }
+
+    /// Try to read the next token as an array header.
+    #[inline]
+    pub(crate) fn try_read_seq_start(&mut self) -> Option<u32> {
+        let data = self.data;
+        match data {
+            [b'a', b':', rest @ ..] => {
+                let (elements, rest) = read_u32(rest, b':').ok()?;
+                match rest {
+                    [b'{', rest @ ..] => {
+                        self.data = rest;
+                        Some(elements)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
         }
     }
 
@@ -616,6 +720,123 @@ mod tests {
     fn test_parse_string(#[case] input: &str, #[case] expected: PhpToken<'_>) {
         let mut parser = PhpParser::new(input.as_bytes());
         assert_eq!(parser.next_token().unwrap(), Some(expected));
+    }
+
+    #[rstest]
+    #[case(b"s:0:\"\";i:-3;i:9;", b"", 7, -3)]
+    #[case(b"s:5:\"hello\";i:7;", b"hello", 12, 7)]
+    #[case(b"s:10:\"0123456789\";i:7;", b"0123456789", 18, 7)]
+    fn test_try_read_str(
+        #[case] input: &[u8],
+        #[case] expected: &[u8],
+        #[case] expected_position: usize,
+        #[case] next_integer: i64,
+    ) {
+        let mut parser = PhpParser::new(input);
+
+        assert_eq!(parser.try_read_str(), Some(PhpBstr::new(expected)));
+        assert_eq!(parser.position(), expected_position);
+        assert_eq!(
+            parser.read_token().unwrap(),
+            PhpToken::Integer(next_integer)
+        );
+    }
+
+    #[test]
+    fn test_try_read_str_returns_none_without_consuming_non_string_token() {
+        let mut parser = PhpParser::new(b"i:42;");
+
+        assert_eq!(parser.try_read_str(), None);
+        assert_eq!(parser.position(), 0);
+        assert_eq!(parser.read_token().unwrap(), PhpToken::Integer(42));
+    }
+
+    #[rstest]
+    #[case(b"i:-3;s:2:\"ok\";", -3, 5, PhpToken::String(PhpBstr::new(b"ok")))]
+    #[case(b"i:42;i:7;", 42, 5, PhpToken::Integer(7))]
+    fn test_try_read_i64(
+        #[case] input: &[u8],
+        #[case] expected: i64,
+        #[case] expected_position: usize,
+        #[case] next_token: PhpToken<'_>,
+    ) {
+        let mut parser = PhpParser::new(input);
+
+        assert_eq!(parser.try_read_i64(), Some(expected));
+        assert_eq!(parser.position(), expected_position);
+        assert_eq!(parser.read_token().unwrap(), next_token);
+    }
+
+    #[test]
+    fn test_try_read_i64_returns_none_without_consuming_non_integer_token() {
+        let mut parser = PhpParser::new(b"s:2:\"ok\";");
+
+        assert_eq!(parser.try_read_i64(), None);
+        assert_eq!(parser.position(), 0);
+        assert_eq!(
+            parser.read_token().unwrap(),
+            PhpToken::String(PhpBstr::new(b"ok"))
+        );
+    }
+
+    #[rstest]
+    #[case(b"d:3.33;i:7;", 3.33, 7, 7)]
+    #[case(b"d:-0.5;i:7;", -0.5, 7, 7)]
+    #[case(b"d:1.0E+25;i:7;", 1.0E25, 10, 7)]
+    fn test_try_read_f64(
+        #[case] input: &[u8],
+        #[case] expected: f64,
+        #[case] expected_position: usize,
+        #[case] next_integer: i64,
+    ) {
+        let mut parser = PhpParser::new(input);
+
+        assert_eq!(parser.try_read_f64(), Some(expected));
+        assert_eq!(parser.position(), expected_position);
+        assert_eq!(
+            parser.read_token().unwrap(),
+            PhpToken::Integer(next_integer)
+        );
+    }
+
+    #[test]
+    fn test_try_read_f64_returns_none_without_consuming_non_float_token() {
+        let mut parser = PhpParser::new(b"i:42;");
+
+        assert_eq!(parser.try_read_f64(), None);
+        assert_eq!(parser.position(), 0);
+        assert_eq!(parser.read_token().unwrap(), PhpToken::Integer(42));
+    }
+
+    #[rstest]
+    #[case(b"a:0:{}i:7;", 0, 5, PhpToken::End)]
+    #[case(
+        b"a:3:{i:0;s:3:\"foo\";i:1;s:3:\"bar\";i:2;s:3:\"baz\";}",
+        3,
+        5,
+        PhpToken::Integer(0)
+    )]
+    #[case(b"a:12:{}i:7;", 12, 6, PhpToken::End)]
+    fn test_try_read_seq_start(
+        #[case] input: &[u8],
+        #[case] expected_elements: u32,
+        #[case] expected_position: usize,
+        #[case] next_token: PhpToken<'_>,
+    ) {
+        let mut parser = PhpParser::new(input);
+
+        assert_eq!(parser.try_read_seq_start(), Some(expected_elements));
+        assert_eq!(parser.position(), expected_position);
+        assert_eq!(parser.read_token().unwrap(), next_token);
+    }
+
+    #[test]
+    fn test_try_read_seq_start_returns_none_without_consuming_non_array_token() {
+        let mut parser = PhpParser::new(b"i:42;");
+
+        assert_eq!(parser.try_read_seq_start(), None);
+        assert_eq!(parser.position(), 0);
+        assert_eq!(parser.read_token().unwrap(), PhpToken::Integer(42));
     }
 
     #[rstest]

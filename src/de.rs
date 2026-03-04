@@ -84,70 +84,76 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
     where
         V: de::Visitor<'de>,
     {
-        self.deserialize_any(visitor)
+        self.deserialize_i64(visitor)
     }
 
     fn deserialize_i16<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: de::Visitor<'de>,
     {
-        self.deserialize_any(visitor)
+        self.deserialize_i64(visitor)
     }
 
     fn deserialize_i32<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: de::Visitor<'de>,
     {
-        self.deserialize_any(visitor)
+        self.deserialize_i64(visitor)
     }
 
     fn deserialize_i64<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: de::Visitor<'de>,
     {
-        self.deserialize_any(visitor)
+        match self.parser.try_read_i64() {
+            Some(i) => visitor.visit_i64(i),
+            None => self.deserialize_any(visitor),
+        }
     }
 
     fn deserialize_u8<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: de::Visitor<'de>,
     {
-        self.deserialize_any(visitor)
+        self.deserialize_i64(visitor)
     }
 
     fn deserialize_u16<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: de::Visitor<'de>,
     {
-        self.deserialize_any(visitor)
+        self.deserialize_i64(visitor)
     }
 
     fn deserialize_u32<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: de::Visitor<'de>,
     {
-        self.deserialize_any(visitor)
+        self.deserialize_i64(visitor)
     }
 
     fn deserialize_u64<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: de::Visitor<'de>,
     {
-        self.deserialize_any(visitor)
+        self.deserialize_i64(visitor)
     }
 
     fn deserialize_f32<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: de::Visitor<'de>,
     {
-        self.deserialize_any(visitor)
+        self.deserialize_f64(visitor)
     }
 
     fn deserialize_f64<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: de::Visitor<'de>,
     {
-        self.deserialize_any(visitor)
+        match self.parser.try_read_f64() {
+            Some(f) => visitor.visit_f64(f),
+            None => self.deserialize_any(visitor),
+        }
     }
 
     fn deserialize_string<V>(self, visitor: V) -> Result<V::Value, Self::Error>
@@ -161,15 +167,15 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
     where
         V: de::Visitor<'de>,
     {
-        match self.parser.read_token()? {
-            PhpToken::String(s) => {
-                if let Ok(str_value) = s.to_str() {
+        match self.parser.try_read_str().and_then(|x| x.to_str().ok()) {
+            Some(s) => visitor.visit_borrowed_str(s),
+            None => match self.parser.read_token()? {
+                PhpToken::String(s) => {
+                    let str_value = s.to_str()?;
                     visitor.visit_borrowed_str(str_value)
-                } else {
-                    visitor.visit_borrowed_bytes(s.as_bytes())
                 }
-            }
-            token => self.deserialize_token(visitor, token),
+                token => self.deserialize_token(visitor, token),
+            },
         }
     }
 
@@ -184,7 +190,10 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
     where
         V: de::Visitor<'de>,
     {
-        self.deserialize_any(visitor)
+        match self.parser.try_read_str() {
+            Some(s) => visitor.visit_borrowed_bytes(s.as_bytes()),
+            None => self.deserialize_any(visitor),
+        }
     }
 
     fn deserialize_byte_buf<V>(self, visitor: V) -> Result<V::Value, Self::Error>
@@ -243,16 +252,23 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
     where
         V: de::Visitor<'de>,
     {
-        match self.parser.read_token()? {
-            PhpToken::Array { elements } => visitor.visit_seq(PhpSeqAccess {
+        match self.parser.try_read_seq_start() {
+            Some(elements) => visitor.visit_seq(PhpSeqAccess {
                 de: self,
                 remaining: elements,
                 next_index: 0,
             }),
-            _ => Err(Error::from(ErrorKind::Deserialize {
-                message: "Expected array".to_string(),
-                position: Some(self.parser.position()),
-            })),
+            None => match self.parser.read_token()? {
+                PhpToken::Array { elements } => visitor.visit_seq(PhpSeqAccess {
+                    de: self,
+                    remaining: elements,
+                    next_index: 0,
+                }),
+                _ => Err(Error::from(ErrorKind::Deserialize {
+                    message: "Expected array".to_string(),
+                    position: Some(self.parser.position()),
+                })),
+            },
         }
     }
 
@@ -464,12 +480,15 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
     where
         V: de::Visitor<'de>,
     {
-        match self.parser.read_token()? {
-            PhpToken::String(s) => {
+        match self.parser.try_read_str() {
+            Some(s) => {
                 let prop = s.to_property();
-                visitor.visit_bytes(prop.as_bytes())
+                visitor.visit_borrowed_bytes(prop.as_bytes())
             }
-            token => self.deserialize_token(visitor, token),
+            None => {
+                let token = self.parser.read_token()?;
+                self.deserialize_token(visitor, token)
+            }
         }
     }
 
@@ -495,21 +514,22 @@ impl<'de> SeqAccess<'de> for PhpSeqAccess<'_, 'de> {
         T: DeserializeSeed<'de>,
     {
         if self.remaining == 0 {
-            match self.de.parser.read_token()? {
-                PhpToken::End => return Ok(None),
-                _ => {
-                    return Err(Error::from(ErrorKind::Deserialize {
-                        message: "Expected end of sequence".to_string(),
-                        position: Some(self.de.parser.position()),
-                    }));
-                }
+            if self.de.parser.try_read_end() {
+                return Ok(None);
             }
+            if self.de.parser.peek_token()?.is_none() {
+                return Err(Error::from(ErrorKind::Eof));
+            }
+            return Err(Error::from(ErrorKind::Deserialize {
+                message: "Expected end of sequence".to_string(),
+                position: Some(self.de.parser.position()),
+            }));
         }
 
         let expected_index = self.next_index;
-        match self.de.parser.read_token()? {
-            PhpToken::Integer(index) if index == expected_index => {}
-            PhpToken::Integer(index) => {
+        match self.de.parser.try_read_i64() {
+            Some(index) if index == expected_index => {}
+            Some(index) => {
                 return Err(Error::from(ErrorKind::Deserialize {
                     message: format!(
                         "Expected sequence index {expected_index}, found integer key {index}"
@@ -517,14 +537,25 @@ impl<'de> SeqAccess<'de> for PhpSeqAccess<'_, 'de> {
                     position: Some(self.de.parser.position()),
                 }));
             }
-            _ => {
-                return Err(Error::from(ErrorKind::Deserialize {
-                    message: format!(
-                        "Expected sequence index {expected_index}, found non-integer key"
-                    ),
-                    position: Some(self.de.parser.position()),
-                }));
-            }
+            None => match self.de.parser.read_token()? {
+                PhpToken::Integer(index) if index == expected_index => {}
+                PhpToken::Integer(index) => {
+                    return Err(Error::from(ErrorKind::Deserialize {
+                        message: format!(
+                            "Expected sequence index {expected_index}, found integer key {index}"
+                        ),
+                        position: Some(self.de.parser.position()),
+                    }));
+                }
+                _ => {
+                    return Err(Error::from(ErrorKind::Deserialize {
+                        message: format!(
+                            "Expected sequence index {expected_index}, found non-integer key"
+                        ),
+                        position: Some(self.de.parser.position()),
+                    }));
+                }
+            },
         }
 
         self.remaining -= 1;
@@ -546,15 +577,13 @@ impl<'de> MapAccess<'de> for PhpMapAccess<'_, 'de> {
         K: DeserializeSeed<'de>,
     {
         if self.remaining == 0 {
-            match self.de.parser.read_token()? {
-                PhpToken::End => return Ok(None),
-                _ => {
-                    return Err(Error::from(ErrorKind::Deserialize {
-                        message: "Expected end of map".to_string(),
-                        position: Some(self.de.parser.position()),
-                    }));
-                }
+            if self.de.parser.try_read_end() {
+                return Ok(None);
             }
+            return Err(Error::from(ErrorKind::Deserialize {
+                message: "Expected end of map".to_string(),
+                position: Some(self.de.parser.position()),
+            }));
         }
         self.remaining -= 1;
         seed.deserialize(&mut *self.de).map(Some)
@@ -694,11 +723,37 @@ mod tests {
     }
 
     #[test]
+    fn test_deserialize_float32() {
+        let input = b"d:3.33;";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: f32 = Deserialize::deserialize(&mut deserializer).unwrap();
+        assert_eq!(result, 3.33_f32);
+    }
+
+    #[test]
     fn test_deserialize_string() {
         let input = b"s:5:\"hello\";";
         let mut deserializer = PhpDeserializer::new(&input[..]);
         let result: String = Deserialize::deserialize(&mut deserializer).unwrap();
         assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_deserialize_char() {
+        let input = b"s:1:\"x\";";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: char = Deserialize::deserialize(&mut deserializer).unwrap();
+        assert_eq!(result, 'x');
+    }
+
+    #[test]
+    fn test_deserialize_char_fast_path() {
+        // Trailing serialized data keeps at least 16 bytes available so try_read_str() takes
+        // its short-string fast path for the first token.
+        let input = b"s:4:\"\xF0\x9F\x98\x80\";s:1:\"z\";";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: char = Deserialize::deserialize(&mut deserializer).unwrap();
+        assert_eq!(result, '😀');
     }
 
     #[test]
@@ -869,6 +924,48 @@ mod tests {
     }
 
     #[test]
+    fn test_deserialize_seq_explicitly() {
+        #[derive(Debug, PartialEq)]
+        struct ExplicitSeq(Vec<i64>);
+
+        impl<'de> Deserialize<'de> for ExplicitSeq {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct ExplicitSeqVisitor;
+
+                impl<'de> de::Visitor<'de> for ExplicitSeqVisitor {
+                    type Value = ExplicitSeq;
+
+                    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                        formatter.write_str("a sequence of integers")
+                    }
+
+                    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+                    where
+                        A: de::SeqAccess<'de>,
+                    {
+                        let mut values = Vec::new();
+                        while let Some(value) = seq.next_element()? {
+                            values.push(value);
+                        }
+
+                        Ok(ExplicitSeq(values))
+                    }
+                }
+
+                deserializer.deserialize_seq(ExplicitSeqVisitor)
+            }
+        }
+
+        let input = b"a:0:{}";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result = ExplicitSeq::deserialize(&mut deserializer).unwrap();
+        assert_eq!(result, ExplicitSeq(vec![]));
+    }
+
+    #[test]
     fn test_deserialize_seq_missing_end_reports_eof() {
         let input = b"a:1:{i:0;i:10;";
         let mut deserializer = PhpDeserializer::new(&input[..]);
@@ -1009,6 +1106,14 @@ mod tests {
                     {
                         Ok(ExplicitStr(v.to_owned()))
                     }
+
+                    fn visit_borrowed_bytes<E>(self, v: &'_ [u8]) -> Result<Self::Value, E>
+                    where
+                        E: de::Error,
+                    {
+                        let s = std::str::from_utf8(v).map_err(|_| E::custom("Invalid UTF-8"))?;
+                        Ok(ExplicitStr(s.to_owned()))
+                    }
                 }
 
                 deserializer.deserialize_str(ExplicitStrVisitor)
@@ -1047,6 +1152,14 @@ mod tests {
                     {
                         Ok(ExplicitString(v.to_owned()))
                     }
+
+                    fn visit_borrowed_bytes<E>(self, v: &'_ [u8]) -> Result<Self::Value, E>
+                    where
+                        E: de::Error,
+                    {
+                        let s = std::str::from_utf8(v).map_err(|_| E::custom("Invalid UTF-8"))?;
+                        Ok(ExplicitString(s.to_owned()))
+                    }
                 }
 
                 deserializer.deserialize_string(ExplicitStringVisitor)
@@ -1083,6 +1196,14 @@ mod tests {
                         E: de::Error,
                     {
                         Ok(ExplicitStr(v.to_owned()))
+                    }
+
+                    fn visit_borrowed_bytes<E>(self, v: &'_ [u8]) -> Result<Self::Value, E>
+                    where
+                        E: de::Error,
+                    {
+                        let s = std::str::from_utf8(v).map_err(|_| E::custom("Invalid UTF-8"))?;
+                        Ok(ExplicitStr(s.to_owned()))
                     }
                 }
 
