@@ -141,8 +141,6 @@ pub enum PhpTokenKind {
 #[derive(Debug)]
 pub struct PhpParser<'a> {
     data: &'a [u8],
-    // stores data_len at the time of the peek, not position
-    lookahead: Option<(PhpTokenKind, usize)>,
     original_len: usize,
 }
 
@@ -153,21 +151,13 @@ impl<'a> PhpParser<'a> {
         Self {
             original_len: data.len(),
             data,
-            lookahead: None,
         }
     }
 
     /// Get the current position of the parser.
-    ///
-    /// Returns the number of bytes consumed so far, accounting for lookahead.
     #[must_use]
     pub fn position(&self) -> usize {
-        let consumed = self.original_len - self.data.len();
-        if let Some((_, data_len)) = self.lookahead {
-            self.original_len - data_len
-        } else {
-            consumed
-        }
+        self.original_len - self.data.len()
     }
 
     #[inline]
@@ -233,18 +223,38 @@ impl<'a> PhpParser<'a> {
     /// assert_eq!(parser.next_token().unwrap(), Some(PhpToken::Integer(42)));
     /// ```
     pub fn peek_token(&mut self) -> Result<Option<PhpTokenKind>, Error> {
-        if let Some((token, _)) = self.lookahead {
-            return Ok(Some(token));
-        }
+        let mut data = self.data;
+        let mut consumed = 0;
 
-        let data_len = self.data.len();
-        match self.read_next() {
-            Ok(Some(token)) => {
-                self.lookahead = Some((token, data_len));
-                Ok(Some(token))
-            }
-            Ok(None) => Ok(None),
-            Err(e) => Err(e),
+        loop {
+            let Some((&c, rest)) = data.split_first() else {
+                return Ok(None);
+            };
+
+            consumed += 1;
+            let kind = match c {
+                b'N' => PhpTokenKind::Null,
+                b'b' => PhpTokenKind::Boolean,
+                b'i' => PhpTokenKind::Integer,
+                b'd' => PhpTokenKind::Float,
+                b's' => PhpTokenKind::String,
+                b'a' => PhpTokenKind::Array,
+                b'O' => PhpTokenKind::Object,
+                b'r' => PhpTokenKind::Reference,
+                b'}' => PhpTokenKind::End,
+                b'\n' => {
+                    data = rest;
+                    continue;
+                }
+                _ => {
+                    return Err(Error::from(ErrorKind::UnexpectedByte {
+                        found: c,
+                        position: self.position() + consumed,
+                    }));
+                }
+            };
+
+            return Ok(Some(kind));
         }
     }
 
@@ -264,12 +274,9 @@ impl<'a> PhpParser<'a> {
     /// ```
     #[inline]
     pub fn next_token(&mut self) -> Result<Option<PhpToken<'a>>, Error> {
-        let kind = match self.lookahead.take() {
-            Some((kind, _)) => kind,
-            None => match self.read_next()? {
-                Some(kind) => kind,
-                None => return Ok(None),
-            },
+        let kind = match self.read_next()? {
+            Some(kind) => kind,
+            None => return Ok(None),
         };
 
         match kind {
