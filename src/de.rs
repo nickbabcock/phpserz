@@ -45,7 +45,7 @@ impl<'de> PhpDeserializer<'de> {
             PhpToken::Integer(i) => visitor.visit_i64(i),
             PhpToken::Float(f) => visitor.visit_f64(f),
             PhpToken::String(s) => visitor.visit_borrowed_bytes(s.as_bytes()),
-            PhpToken::Array { elements } => visitor.visit_seq(PhpSeqAccess {
+            PhpToken::Array { elements } => visitor.visit_map(PhpMapAccess {
                 de: self,
                 remaining: elements,
             }),
@@ -243,7 +243,17 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
     where
         V: de::Visitor<'de>,
     {
-        self.deserialize_any(visitor)
+        match self.parser.read_token()? {
+            PhpToken::Array { elements } => visitor.visit_seq(PhpSeqAccess {
+                de: self,
+                remaining: elements,
+                next_index: 0,
+            }),
+            _ => Err(Error::from(ErrorKind::Deserialize {
+                message: "Expected array".to_string(),
+                position: Some(self.parser.position()),
+            })),
+        }
     }
 
     fn deserialize_tuple<V>(self, len: usize, visitor: V) -> Result<V::Value, Self::Error>
@@ -255,6 +265,7 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
                 visitor.visit_seq(PhpSeqAccess {
                     de: self,
                     remaining: elements,
+                    next_index: 0,
                 })
             }
             Some(PhpToken::Array { .. }) => Err(Error::from(ErrorKind::Deserialize {
@@ -473,6 +484,7 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
 struct PhpSeqAccess<'a, 'de: 'a> {
     de: &'a mut PhpDeserializer<'de>,
     remaining: u32,
+    next_index: i64,
 }
 
 impl<'de> SeqAccess<'de> for PhpSeqAccess<'_, 'de> {
@@ -493,7 +505,30 @@ impl<'de> SeqAccess<'de> for PhpSeqAccess<'_, 'de> {
                 }
             }
         }
+
+        let expected_index = self.next_index;
+        match self.de.parser.read_token()? {
+            PhpToken::Integer(index) if index == expected_index => {}
+            PhpToken::Integer(index) => {
+                return Err(Error::from(ErrorKind::Deserialize {
+                    message: format!(
+                        "Expected sequence index {expected_index}, found integer key {index}"
+                    ),
+                    position: Some(self.de.parser.position()),
+                }));
+            }
+            _ => {
+                return Err(Error::from(ErrorKind::Deserialize {
+                    message: format!(
+                        "Expected sequence index {expected_index}, found non-integer key"
+                    ),
+                    position: Some(self.de.parser.position()),
+                }));
+            }
+        }
+
         self.remaining -= 1;
+        self.next_index += 1;
         seed.deserialize(&mut *self.de).map(Some)
     }
 }
@@ -784,6 +819,111 @@ mod tests {
         assert_eq!(
             result[0].1,
             NestedArray(vec![("inner".to_string(), "value".to_string())])
+        );
+    }
+
+    #[test]
+    fn test_deserialize_vec_from_php_array() {
+        let input = b"a:3:{i:0;s:2:\"aa\";i:1;s:2:\"bb\";i:2;s:2:\"cc\";}";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: Vec<String> = Deserialize::deserialize(&mut deserializer).unwrap();
+
+        assert_eq!(result, vec!["aa", "bb", "cc"]);
+    }
+
+    #[test]
+    fn test_deserialize_vec_from_single_element_php_array() {
+        let input = b"a:1:{i:0;i:10;}";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: Vec<i64> = Deserialize::deserialize(&mut deserializer).unwrap();
+
+        assert_eq!(result, vec![10]);
+    }
+
+    #[test]
+    fn test_deserialize_vec_rejects_sparse_php_array() {
+        let input = b"a:2:{i:1;s:2:\"aa\";i:3;s:2:\"bb\";}";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: Result<Vec<String>, _> = Deserialize::deserialize(&mut deserializer);
+        let error = result.unwrap_err();
+
+        assert!(matches!(
+            error.kind(),
+            ErrorKind::Deserialize { message, .. }
+                if message == "Expected sequence index 0, found integer key 1"
+        ));
+    }
+
+    #[test]
+    fn test_deserialize_vec_rejects_non_integer_php_array_key() {
+        let input = b"a:1:{s:3:\"foo\";s:3:\"bar\";}";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: Result<Vec<String>, _> = Deserialize::deserialize(&mut deserializer);
+        let error = result.unwrap_err();
+
+        assert!(matches!(
+            error.kind(),
+            ErrorKind::Deserialize { message, .. }
+                if message == "Expected sequence index 0, found non-integer key"
+        ));
+    }
+
+    #[test]
+    fn test_deserialize_seq_missing_end_reports_eof() {
+        let input = b"a:1:{i:0;i:10;";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: Result<Vec<i64>, _> = Deserialize::deserialize(&mut deserializer);
+        let error = result.unwrap_err();
+
+        assert!(matches!(error.kind(), ErrorKind::Eof));
+    }
+
+    #[test]
+    fn test_deserialize_any_array_prefers_map() {
+        #[derive(Debug, PartialEq)]
+        struct AnyArray(Vec<(String, String)>);
+
+        impl<'de> Deserialize<'de> for AnyArray {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct AnyArrayVisitor;
+
+                impl<'de> de::Visitor<'de> for AnyArrayVisitor {
+                    type Value = AnyArray;
+
+                    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                        formatter.write_str("a PHP array exposed as a map")
+                    }
+
+                    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+                    where
+                        A: de::MapAccess<'de>,
+                    {
+                        let mut entries = Vec::new();
+                        while let Some((key, value)) = map.next_entry::<String, String>()? {
+                            entries.push((key, value));
+                        }
+
+                        Ok(AnyArray(entries))
+                    }
+                }
+
+                deserializer.deserialize_any(AnyArrayVisitor)
+            }
+        }
+
+        let input = b"a:2:{s:3:\"foo\";s:3:\"bar\";s:3:\"baz\";s:3:\"qux\";}";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result = AnyArray::deserialize(&mut deserializer).unwrap();
+
+        assert_eq!(
+            result,
+            AnyArray(vec![
+                ("foo".to_string(), "bar".to_string()),
+                ("baz".to_string(), "qux".to_string()),
+            ])
         );
     }
 
