@@ -181,33 +181,31 @@ impl<'a> PhpParser<'a> {
 
     #[inline]
     fn read_next(&mut self) -> Result<Option<PhpTokenKind>, Error> {
-        loop {
-            let Some((&c, rest)) = self.data.split_first() else {
-                return Ok(None);
-            };
+        let position = self.position();
+        let Some((&c, rest)) = self.data.split_first() else {
+            return Ok(None);
+        };
 
-            self.data = rest;
-            let kind = match c {
-                b'N' => PhpTokenKind::Null,
-                b'b' => PhpTokenKind::Boolean,
-                b'i' => PhpTokenKind::Integer,
-                b'd' => PhpTokenKind::Float,
-                b's' => PhpTokenKind::String,
-                b'a' => PhpTokenKind::Array,
-                b'O' => PhpTokenKind::Object,
-                b'r' => PhpTokenKind::Reference,
-                b'}' => PhpTokenKind::End,
-                b'\n' => continue,
-                _ => {
-                    return Err(Error::from(ErrorKind::UnexpectedByte {
-                        found: c,
-                        position: self.position(),
-                    }));
-                }
-            };
+        let kind = match c {
+            b'N' => PhpTokenKind::Null,
+            b'b' => PhpTokenKind::Boolean,
+            b'i' => PhpTokenKind::Integer,
+            b'd' => PhpTokenKind::Float,
+            b's' => PhpTokenKind::String,
+            b'a' => PhpTokenKind::Array,
+            b'O' => PhpTokenKind::Object,
+            b'r' => PhpTokenKind::Reference,
+            b'}' => PhpTokenKind::End,
+            _ => {
+                return Err(Error::from(ErrorKind::UnexpectedByte {
+                    found: c,
+                    position,
+                }));
+            }
+        };
 
-            return Ok(Some(kind));
-        }
+        self.data = rest;
+        Ok(Some(kind))
     }
 
     /// Peek at the kind of the next token without consuming it.
@@ -223,39 +221,29 @@ impl<'a> PhpParser<'a> {
     /// assert_eq!(parser.next_token().unwrap(), Some(PhpToken::Integer(42)));
     /// ```
     pub fn peek_token(&mut self) -> Result<Option<PhpTokenKind>, Error> {
-        let mut data = self.data;
-        let mut consumed = 0;
+        let Some((&c, _rest)) = self.data.split_first() else {
+            return Ok(None);
+        };
 
-        loop {
-            let Some((&c, rest)) = data.split_first() else {
-                return Ok(None);
-            };
+        let kind = match c {
+            b'N' => PhpTokenKind::Null,
+            b'b' => PhpTokenKind::Boolean,
+            b'i' => PhpTokenKind::Integer,
+            b'd' => PhpTokenKind::Float,
+            b's' => PhpTokenKind::String,
+            b'a' => PhpTokenKind::Array,
+            b'O' => PhpTokenKind::Object,
+            b'r' => PhpTokenKind::Reference,
+            b'}' => PhpTokenKind::End,
+            _ => {
+                return Err(Error::from(ErrorKind::UnexpectedByte {
+                    found: c,
+                    position: self.position(),
+                }));
+            }
+        };
 
-            consumed += 1;
-            let kind = match c {
-                b'N' => PhpTokenKind::Null,
-                b'b' => PhpTokenKind::Boolean,
-                b'i' => PhpTokenKind::Integer,
-                b'd' => PhpTokenKind::Float,
-                b's' => PhpTokenKind::String,
-                b'a' => PhpTokenKind::Array,
-                b'O' => PhpTokenKind::Object,
-                b'r' => PhpTokenKind::Reference,
-                b'}' => PhpTokenKind::End,
-                b'\n' => {
-                    data = rest;
-                    continue;
-                }
-                _ => {
-                    return Err(Error::from(ErrorKind::UnexpectedByte {
-                        found: c,
-                        position: self.position() + consumed,
-                    }));
-                }
-            };
-
-            return Ok(Some(kind));
-        }
+        Ok(Some(kind))
     }
 
     /// Reads the next token, and will error if the end of the input is reached.
@@ -470,10 +458,6 @@ impl<'a> PhpParser<'a> {
     #[cold]
     fn map_error(&self, error: ScalarError) -> Error {
         match error {
-            ScalarError::StringTooLong => (ErrorKind::StringTooLong {
-                position: self.position(),
-            })
-            .into(),
             ScalarError::MissingQuotes => (ErrorKind::MissingQuotes {
                 position: self.position(),
             })
@@ -497,7 +481,6 @@ impl<'a> PhpParser<'a> {
 
 #[derive(Debug, PartialEq, Clone, Copy, Eq, Hash)]
 enum ScalarError {
-    StringTooLong,
     MissingQuotes,
     Empty,
     Overflow,
@@ -510,7 +493,7 @@ fn read_str(data: &[u8]) -> Result<(PhpBstr<'_>, &[u8]), ScalarError> {
     let (len, data) = read_u32(data, b':')?;
     let len = len as usize;
     let Some((contents, rest)) = data.split_at_checked(len + 2) else {
-        return Err(ScalarError::StringTooLong);
+        return Err(ScalarError::Eof);
     };
 
     match contents {
@@ -954,6 +937,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_invalid_token_reports_offending_position() {
+        let mut parser = PhpParser::new(b"x:invalid;");
+        let error = parser.next_token().unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            ErrorKind::UnexpectedByte { position, .. } if *position == 0
+        ));
+    }
+
+    #[test]
+    fn test_invalid_token_peek_reports_offending_position() {
+        let mut parser = PhpParser::new(b"x:invalid;");
+        let error = parser.peek_token().unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            ErrorKind::UnexpectedByte { position, .. } if *position == 0
+        ));
+    }
+
+    #[test]
+    fn test_leading_newline_is_rejected() {
+        let mut parser = PhpParser::new(b"\ni:42;");
+        let error = parser.next_token().unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            ErrorKind::UnexpectedByte {
+                found: b'\n',
+                position: 0
+            }
+        ));
+    }
+
     #[rstest]
     #[case(b"b:2;")]
     #[case(b"b:3;")]
@@ -1023,6 +1039,15 @@ mod tests {
             "Expected an error for string content mismatch: {}",
             String::from_utf8_lossy(input)
         );
+    }
+
+    #[rstest]
+    #[case(b"s:10:\"hello\";")]
+    #[case(b"s:1000:\"hello\";")]
+    fn test_truncated_string_reports_eof(#[case] input: &[u8]) {
+        let mut parser = PhpParser::new(input);
+        let error = parser.next_token().unwrap_err();
+        assert!(matches!(error.kind(), ErrorKind::Eof));
     }
 
     #[rstest]
