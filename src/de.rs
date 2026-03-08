@@ -167,8 +167,8 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
     where
         V: de::Visitor<'de>,
     {
-        match self.parser.try_read_str().and_then(|x| x.to_str().ok()) {
-            Some(s) => visitor.visit_borrowed_str(s),
+        match self.parser.try_read_str() {
+            Some(s) => visitor.visit_borrowed_str(s.to_str()?),
             None => match self.parser.read_token()? {
                 PhpToken::String(s) => {
                     let str_value = s.to_str()?;
@@ -1253,6 +1253,18 @@ mod tests {
         let mut deserializer = PhpDeserializer::new(&input[..]);
         let result = ExplicitStr::deserialize(&mut deserializer);
         assert!(result.is_err(), "Should fail on invalid UTF-8");
+    }
+
+    #[test]
+    fn test_invalid_utf8_string_does_not_consume_next_token() {
+        let input = b"s:4:\"\xFF\xFF\xFF\xFF\";i:7;";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: Result<String, _> = Deserialize::deserialize(&mut deserializer);
+        assert!(result.is_err(), "Should fail on invalid UTF-8");
+
+        let mut parser = deserializer.into_parser();
+        let token = parser.next_token().unwrap().unwrap();
+        assert_eq!(token, PhpToken::Integer(7));
     }
 
     #[test]
