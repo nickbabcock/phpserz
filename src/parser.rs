@@ -522,24 +522,24 @@ fn read_str(data: &[u8]) -> Result<(PhpBstr<'_>, &[u8]), ScalarError> {
 #[inline]
 fn read_u32(mut data: &[u8], delimiter: u8) -> Result<(u32, &[u8]), ScalarError> {
     let mut result = 0u64;
-    let original_len = data.len();
+    let mut digits = 0usize;
     while let Some((&c, rest)) = data.split_first() {
         if c.is_ascii_digit() {
             result = result.wrapping_mul(10);
             result = result.wrapping_add(u64::from(c - b'0'));
             data = rest;
+            digits += 1;
         } else if c == delimiter {
-            let bytes_read = original_len - rest.len();
-
-            if bytes_read == 0 {
+            if digits == 0 {
                 return Err(ScalarError::Empty);
             }
 
-            // Check for overflow
-            if result > u64::from(u32::MAX) || bytes_read > 11 {
+            // u32::MAX is 10 digits; any 11+ digit number overflows.
+            // For ≤10 digits, the value fits in u64 without wrapping, so
+            // comparing against u32::MAX is sufficient.
+            if digits > 10 || result > u64::from(u32::MAX) {
                 return Err(ScalarError::Overflow);
             }
-
             return Ok((result as u32, rest));
         } else {
             return Err(ScalarError::Invalid);
@@ -551,45 +551,39 @@ fn read_u32(mut data: &[u8], delimiter: u8) -> Result<(u32, &[u8]), ScalarError>
 
 #[inline]
 fn to_i64(d: &[u8]) -> Result<(i64, &[u8]), ScalarError> {
-    let mut integer_part = d;
-
     let Some((&c, mut data)) = d.split_first() else {
         return Err(ScalarError::Empty);
     };
 
-    let mut negative = 0;
+    let negative = c == b'-';
+    let mut digits = 0usize;
     let mut result = if c.is_ascii_digit() {
+        digits = 1;
         u64::from(c - b'0')
     } else if c == b'-' {
-        integer_part = data;
-        negative = 1;
         0
     } else {
         return Err(ScalarError::Invalid);
     };
 
-    let original_len = integer_part.len();
     while let Some((&c, rest)) = data.split_first() {
         if c.is_ascii_digit() {
             result = result.wrapping_mul(10);
             result = result.wrapping_add(u64::from(c - b'0'));
             data = rest;
+            digits += 1;
         } else if c == b';' {
-            let bytes_read = original_len - rest.len();
-            if bytes_read == 0 {
+            if digits == 0 {
                 return Err(ScalarError::Empty);
             }
 
-            // Check for overflow
-            if bytes_read > 19 {
-                check_overflow(integer_part, 0)?;
-            }
-
-            if result > (i64::MAX as u64) + negative {
+            // i64::MAX is 19 digits; u64::MAX is 20 digits, so wrapping only
+            // occurs at 20+ digits. Guard against that before the value check.
+            if digits > 19 || result > (i64::MAX as u64) + u64::from(negative) {
                 return Err(ScalarError::Overflow);
             }
 
-            let sign = -((negative as i64 * 2).wrapping_sub(1));
+            let sign: i64 = if negative { -1 } else { 1 };
             return Ok((sign.wrapping_mul(result as i64), rest));
         } else {
             return Err(ScalarError::Invalid);
@@ -598,26 +592,6 @@ fn to_i64(d: &[u8]) -> Result<(i64, &[u8]), ScalarError> {
 
     Err(ScalarError::Eof)
 }
-
-#[cold]
-fn check_overflow(d: &[u8], start: u64) -> Result<(), ScalarError> {
-    let mut acc = start;
-    for &x in d {
-        // The input should already be validated by this point, so we just
-        // return if we find a non-digit.
-        if !x.is_ascii_digit() {
-            return Ok(());
-        }
-
-        acc = acc
-            .checked_mul(10)
-            .and_then(|acc| acc.checked_add(u64::from(x - b'0')))
-            .ok_or(ScalarError::Overflow)?;
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -970,6 +944,7 @@ mod tests {
 
     #[rstest]
     #[case(b"i:abc;")]
+    #[case(b"i:-;")]
     #[case(b"i:--1;")]
     #[case(b"i:1a;")]
     #[case(b"i: 42;")]
@@ -1001,6 +976,7 @@ mod tests {
 
     #[rstest]
     #[case(b"s:abc:\"hello\";")]
+    #[case(b"s::\"\";")]
     #[case(b"s:-1:\"hello\";")]
     #[case(b"s:9999999999:\"hello\";")]
     fn test_invalid_string_length_format(#[case] input: &[u8]) {
@@ -1039,6 +1015,7 @@ mod tests {
 
     #[rstest]
     #[case(b"a:3:i:0;s:3:\"foo\";}")]
+    #[case(b"a::{")]
     #[case(b"a:-1:{i:0;s:3:\"foo\";}")]
     #[case(b"a:9999999999:{i:0;s:3:\"foo\";}")]
     fn test_invalid_array_structure(#[case] input: &[u8]) {
@@ -1051,6 +1028,7 @@ mod tests {
 
     #[rstest]
     #[case(b"O:3:\"Foo\":;")]
+    #[case(b"O:3:\"Foo\"::{")]
     #[case(b"O:3:\"Foo\":xyz{")]
     #[case(b"O:-1:\"Foo\":2:{")]
     #[case(b"O:3:\"Foo\":-1:{")]
@@ -1066,6 +1044,7 @@ mod tests {
 
     #[rstest]
     #[case(b"r:;")]
+    #[case(b"r:-;")]
     #[case(b"r:xyz;")]
     #[case(b"r:9223372036854775808;")]
     #[case(b"r:-9223372036854775809;")]
