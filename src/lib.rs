@@ -8,4 +8,6 @@ mod parser;
 #[cfg(feature = "serde")]
 pub use de::PhpDeserializer;
 pub use errors::{Error, ErrorKind};
-pub use parser::{PhpBstr, PhpParser, PhpProperty, PhpToken, PhpTokenKind, PhpVisibility};
+pub use parser::{
+    PhpBstr, PhpParser, PhpProperty, PhpReferenceKind, PhpToken, PhpTokenKind, PhpVisibility,
+};

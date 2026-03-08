@@ -65,6 +65,15 @@ pub enum PhpVisibility {
     Private,
 }
 
+/// The kind of PHP reference token.
+#[derive(Debug, PartialEq, Clone, Copy, Eq, Hash)]
+pub enum PhpReferenceKind {
+    /// A repeated object back-reference encoded with the lowercase `r` marker.
+    Repeated,
+    /// A PHP variable alias (`&`) encoded with the uppercase `R` marker.
+    Alias,
+}
+
 /// A PHP object property with its name and visibility.
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct PhpProperty<'a> {
@@ -126,7 +135,7 @@ pub enum PhpToken<'a> {
     End,
 
     /// The reference token.
-    Reference(i64),
+    Reference { id: i64, kind: PhpReferenceKind },
 }
 
 /// The kind of token without data.
@@ -141,7 +150,7 @@ pub enum PhpTokenKind {
     Object,
     CustomObject,
     End,
-    Reference,
+    Reference(PhpReferenceKind),
 }
 
 /// A parser for the PHP serialized format.
@@ -203,7 +212,8 @@ impl<'a> PhpParser<'a> {
             b'a' => PhpTokenKind::Array,
             b'O' => PhpTokenKind::Object,
             b'C' => PhpTokenKind::CustomObject,
-            b'r' => PhpTokenKind::Reference,
+            b'r' => PhpTokenKind::Reference(PhpReferenceKind::Repeated),
+            b'R' => PhpTokenKind::Reference(PhpReferenceKind::Alias),
             b'}' => PhpTokenKind::End,
             _ => {
                 return Err(Error::from(ErrorKind::UnexpectedByte {
@@ -243,7 +253,8 @@ impl<'a> PhpParser<'a> {
             b'a' => PhpTokenKind::Array,
             b'O' => PhpTokenKind::Object,
             b'C' => PhpTokenKind::CustomObject,
-            b'r' => PhpTokenKind::Reference,
+            b'r' => PhpTokenKind::Reference(PhpReferenceKind::Repeated),
+            b'R' => PhpTokenKind::Reference(PhpReferenceKind::Alias),
             b'}' => PhpTokenKind::End,
             _ => {
                 return Err(Error::from(ErrorKind::UnexpectedByte {
@@ -379,11 +390,11 @@ impl<'a> PhpParser<'a> {
                     payload: PhpBstr::new(payload),
                 })
             }
-            PhpTokenKind::Reference => {
+            PhpTokenKind::Reference(kind) => {
                 self.expect(b':')?;
                 let (int, rest) = to_i64(self.data).map_err(|e| self.map_error(e))?;
                 self.data = rest;
-                Ok(PhpToken::Reference(int))
+                Ok(PhpToken::Reference { id: int, kind })
             }
         }
     }
@@ -904,6 +915,26 @@ mod tests {
         let expected = [PhpToken::CustomObject {
             class: PhpBstr::new(b"Test2"),
             payload: PhpBstr::new(b"foobar"),
+        }];
+        validate_tokens(input, &expected);
+    }
+
+    #[test]
+    fn test_parse_lowercase_reference() {
+        let input = b"r:1;";
+        let expected = [PhpToken::Reference {
+            id: 1,
+            kind: PhpReferenceKind::Repeated,
+        }];
+        validate_tokens(input, &expected);
+    }
+
+    #[test]
+    fn test_parse_uppercase_reference() {
+        let input = b"R:2;";
+        let expected = [PhpToken::Reference {
+            id: 2,
+            kind: PhpReferenceKind::Alias,
         }];
         validate_tokens(input, &expected);
     }

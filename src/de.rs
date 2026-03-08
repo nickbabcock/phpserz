@@ -56,7 +56,7 @@ impl<'de> PhpDeserializer<'de> {
             PhpToken::CustomObject { payload, .. } => {
                 visitor.visit_borrowed_bytes(payload.as_bytes())
             }
-            PhpToken::Reference(r) => visitor.visit_i64(r),
+            PhpToken::Reference { id, .. } => visitor.visit_i64(id),
             _ => Err(Error::from(ErrorKind::Deserialize {
                 message: "Unexpected token".to_string(),
                 position: Some(self.parser.position()),
@@ -1430,6 +1430,22 @@ mod tests {
         let mut deserializer = PhpDeserializer::new(&input[..]);
         let result: Result<&[u8], _> = Deserialize::deserialize(&mut deserializer);
         assert_eq!(result.unwrap(), b"foobar");
+    }
+
+    #[test]
+    fn test_deserialize_lowercase_reference_as_id() {
+        let input = b"r:1;";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: i64 = Deserialize::deserialize(&mut deserializer).unwrap();
+        assert_eq!(result, 1);
+    }
+
+    #[test]
+    fn test_deserialize_uppercase_reference_as_id() {
+        let input = b"R:2;";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: i64 = Deserialize::deserialize(&mut deserializer).unwrap();
+        assert_eq!(result, 2);
     }
 
     #[test]
