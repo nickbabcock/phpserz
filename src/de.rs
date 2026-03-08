@@ -348,68 +348,11 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
     where
         V: de::Visitor<'de>,
     {
-        struct EnumAccess<'a, 'de: 'a> {
-            de: &'a mut PhpDeserializer<'de>,
+        struct StringEnumAccess<'de> {
+            variant: &'de str,
         }
 
-        impl<'a, 'de> EnumAccess<'a, 'de> {
-            fn new(de: &'a mut PhpDeserializer<'de>) -> Self {
-                EnumAccess { de }
-            }
-        }
-
-        struct EnumDeserializer<'a, 'de: 'a> {
-            de: &'a mut PhpDeserializer<'de>,
-            token: PhpToken<'de>,
-        }
-
-        impl<'de> serde::Deserializer<'de> for EnumDeserializer<'_, 'de> {
-            type Error = Error;
-
-            fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
-            where
-                V: de::Visitor<'de>,
-            {
-                match self.token {
-                    PhpToken::String(s) => {
-                        let str_value = s.to_str()?;
-                        visitor.visit_str(str_value)
-                    }
-                    _ => Err(Error::from(ErrorKind::Deserialize {
-                        message: "Expected string for enum variant".to_string(),
-                        position: Some(self.de.parser.position()),
-                    })),
-                }
-            }
-
-            fn deserialize_enum<V>(
-                self,
-                _name: &'static str,
-                _variants: &'static [&'static str],
-                visitor: V,
-            ) -> Result<V::Value, Self::Error>
-            where
-                V: de::Visitor<'de>,
-            {
-                self.deserialize_any(visitor)
-            }
-
-            fn deserialize_str<V>(self, visitor: V) -> Result<V::Value, Self::Error>
-            where
-                V: de::Visitor<'de>,
-            {
-                self.deserialize_any(visitor)
-            }
-
-            // Forward all other methods to deserialize_any
-            serde::forward_to_deserialize_any! {
-                bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char string
-                bytes byte_buf option unit unit_struct newtype_struct seq tuple
-                tuple_struct map struct identifier ignored_any
-            }
-        }
-
-        impl<'de> de::EnumAccess<'de> for EnumAccess<'_, 'de> {
+        impl<'de> de::EnumAccess<'de> for StringEnumAccess<'de> {
             type Error = Error;
             type Variant = Self;
 
@@ -417,36 +360,124 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
             where
                 V: de::DeserializeSeed<'de>,
             {
-                // Read the token first to determine what type it is
-                let token = self.de.parser.read_token()?;
-
-                // Create a deserializer that can convert the token to a string
-                let value_deserializer = EnumDeserializer { de: self.de, token };
-
-                let val = seed.deserialize(value_deserializer)?;
-                Ok((val, self))
+                let value = seed.deserialize(
+                    serde::de::value::BorrowedStrDeserializer::<Error>::new(self.variant),
+                )?;
+                Ok((value, self))
             }
         }
 
-        impl<'de> de::VariantAccess<'de> for EnumAccess<'_, 'de> {
+        impl<'de> de::VariantAccess<'de> for StringEnumAccess<'de> {
             type Error = Error;
 
             fn unit_variant(self) -> Result<(), Self::Error> {
                 Ok(())
             }
 
+            fn newtype_variant_seed<T>(self, _seed: T) -> Result<T::Value, Self::Error>
+            where
+                T: de::DeserializeSeed<'de>,
+            {
+                Err(Error::from(ErrorKind::Deserialize {
+                    message: "PHP string can only represent a unit enum variant".to_string(),
+                    position: None,
+                }))
+            }
+
+            fn tuple_variant<V>(self, _len: usize, _visitor: V) -> Result<V::Value, Self::Error>
+            where
+                V: de::Visitor<'de>,
+            {
+                Err(Error::from(ErrorKind::Deserialize {
+                    message: "PHP string can only represent a unit enum variant".to_string(),
+                    position: None,
+                }))
+            }
+
+            fn struct_variant<V>(
+                self,
+                _fields: &'static [&'static str],
+                _visitor: V,
+            ) -> Result<V::Value, Self::Error>
+            where
+                V: de::Visitor<'de>,
+            {
+                Err(Error::from(ErrorKind::Deserialize {
+                    message: "PHP string can only represent a unit enum variant".to_string(),
+                    position: None,
+                }))
+            }
+        }
+
+        struct MapEnumAccess<'a, 'de: 'a> {
+            de: &'a mut PhpDeserializer<'de>,
+        }
+
+        impl<'de> de::EnumAccess<'de> for MapEnumAccess<'_, 'de> {
+            type Error = Error;
+            type Variant = Self;
+
+            fn variant_seed<V>(self, seed: V) -> Result<(V::Value, Self::Variant), Self::Error>
+            where
+                V: de::DeserializeSeed<'de>,
+            {
+                let variant = seed.deserialize(&mut *self.de)?;
+                Ok((variant, self))
+            }
+        }
+
+        impl<'de> de::VariantAccess<'de> for MapEnumAccess<'_, 'de> {
+            type Error = Error;
+
+            fn unit_variant(self) -> Result<(), Self::Error> {
+                match self.de.parser.read_token()? {
+                    PhpToken::Null => {}
+                    _ => {
+                        return Err(Error::from(ErrorKind::Deserialize {
+                            message: "Expected null payload for unit enum variant".to_string(),
+                            position: Some(self.de.parser.position()),
+                        }));
+                    }
+                }
+
+                if self.de.parser.try_read_end() {
+                    return Ok(());
+                }
+
+                Err(Error::from(ErrorKind::Deserialize {
+                    message: "Expected end of enum".to_string(),
+                    position: Some(self.de.parser.position()),
+                }))
+            }
+
             fn newtype_variant_seed<T>(self, seed: T) -> Result<T::Value, Self::Error>
             where
                 T: de::DeserializeSeed<'de>,
             {
-                seed.deserialize(self.de)
+                let value = seed.deserialize(&mut *self.de)?;
+                if self.de.parser.try_read_end() {
+                    return Ok(value);
+                }
+
+                Err(Error::from(ErrorKind::Deserialize {
+                    message: "Expected end of enum".to_string(),
+                    position: Some(self.de.parser.position()),
+                }))
             }
 
             fn tuple_variant<V>(self, _len: usize, visitor: V) -> Result<V::Value, Self::Error>
             where
                 V: de::Visitor<'de>,
             {
-                de::Deserializer::deserialize_seq(self.de, visitor)
+                let value = de::Deserializer::deserialize_seq(&mut *self.de, visitor)?;
+                if self.de.parser.try_read_end() {
+                    return Ok(value);
+                }
+
+                Err(Error::from(ErrorKind::Deserialize {
+                    message: "Expected end of enum".to_string(),
+                    position: Some(self.de.parser.position()),
+                }))
             }
 
             fn struct_variant<V>(
@@ -457,20 +488,34 @@ impl<'de> Deserializer<'de> for &'_ mut PhpDeserializer<'de> {
             where
                 V: de::Visitor<'de>,
             {
-                de::Deserializer::deserialize_map(self.de, visitor)
+                let value = de::Deserializer::deserialize_map(&mut *self.de, visitor)?;
+                if self.de.parser.try_read_end() {
+                    return Ok(value);
+                }
+
+                Err(Error::from(ErrorKind::Deserialize {
+                    message: "Expected end of enum".to_string(),
+                    position: Some(self.de.parser.position()),
+                }))
             }
         }
 
-        // Support multiple token types for enum variants
-        match self.parser.peek_token()? {
-            Some(
-                PhpTokenKind::String
-                | PhpTokenKind::Integer
-                | PhpTokenKind::Boolean
-                | PhpTokenKind::Array,
-            ) => visitor.visit_enum(EnumAccess::new(self)),
+        match self.parser.read_token()? {
+            PhpToken::String(s) => visitor.visit_enum(StringEnumAccess {
+                variant: s.to_str()?,
+            }),
+            PhpToken::Array { elements: 1 } => visitor.visit_enum(MapEnumAccess { de: self }),
+            PhpToken::Object { properties: 1, .. } => {
+                visitor.visit_enum(MapEnumAccess { de: self })
+            }
+            PhpToken::Array { .. } | PhpToken::Object { .. } => {
+                Err(Error::from(ErrorKind::Deserialize {
+                    message: "Expected single-entry map for enum".to_string(),
+                    position: Some(self.parser.position()),
+                }))
+            }
             _ => Err(Error::from(ErrorKind::Deserialize {
-                message: "Expected token for enum variant".to_string(),
+                message: "Expected string or single-entry map for enum".to_string(),
                 position: Some(self.parser.position()),
             })),
         }
@@ -614,7 +659,6 @@ mod tests {
         age: i32,
     }
 
-    // Added enum definition for testing
     #[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Copy)]
     pub enum CoPower {
         #[serde(rename = "N")]
@@ -1385,6 +1429,110 @@ mod tests {
         let mut deserializer = PhpDeserializer::new(&input[..]);
         let result: Message = Deserialize::deserialize(&mut deserializer).unwrap();
         assert_eq!(result, Message::Number(42));
+    }
+
+    #[test]
+    fn test_deserialize_externally_tagged_newtype_enum() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        enum Message {
+            Text(String),
+            Number(i32),
+        }
+
+        let input = b"a:1:{s:4:\"Text\";s:5:\"Hello\";}";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: Message = Deserialize::deserialize(&mut deserializer).unwrap();
+        assert_eq!(result, Message::Text("Hello".to_string()));
+
+        let input = b"a:1:{s:6:\"Number\";i:42;}";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: Message = Deserialize::deserialize(&mut deserializer).unwrap();
+        assert_eq!(result, Message::Number(42));
+    }
+
+    #[test]
+    fn test_deserialize_externally_tagged_tuple_enum() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        enum Shape {
+            Point(i32, i32),
+        }
+
+        let input = b"a:1:{s:5:\"Point\";a:2:{i:0;i:3;i:1;i:4;}}";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: Shape = Deserialize::deserialize(&mut deserializer).unwrap();
+        assert_eq!(result, Shape::Point(3, 4));
+    }
+
+    #[test]
+    fn test_deserialize_externally_tagged_struct_enum() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        enum Message {
+            User { name: String, age: i32 },
+        }
+
+        let input = b"a:1:{s:4:\"User\";a:2:{s:4:\"name\";s:3:\"Bob\";s:3:\"age\";i:30;}}";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: Message = Deserialize::deserialize(&mut deserializer).unwrap();
+        assert_eq!(
+            result,
+            Message::User {
+                name: "Bob".to_string(),
+                age: 30,
+            }
+        );
+    }
+
+    #[test]
+    fn test_deserialize_externally_tagged_enum_rejects_multi_entry_wrapper() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        enum Message {
+            Text(String),
+        }
+
+        let input = b"a:2:{s:4:\"Text\";s:5:\"Hello\";s:5:\"extra\";s:3:\"bad\";}";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: Result<Message, _> = Deserialize::deserialize(&mut deserializer);
+        let error = result.unwrap_err();
+
+        assert!(matches!(
+            error.kind(),
+            ErrorKind::Deserialize { message, .. }
+                if message == "Expected single-entry map for enum"
+        ));
+    }
+
+    #[test]
+    fn test_deserialize_externally_tagged_unit_enum_map_form() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        enum Direction {
+            North,
+            South,
+        }
+
+        // Unit variant encoded as a single-entry map with a null value
+        let input = b"a:1:{s:5:\"North\";N;}";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: Direction = Deserialize::deserialize(&mut deserializer).unwrap();
+        assert_eq!(result, Direction::North);
+
+        let input = b"a:1:{s:5:\"South\";N;}";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: Direction = Deserialize::deserialize(&mut deserializer).unwrap();
+        assert_eq!(result, Direction::South);
+    }
+
+    #[test]
+    fn test_deserialize_externally_tagged_enum_object_form() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        enum Message {
+            Text(String),
+        }
+
+        // Externally tagged enum encoded as a PHP object with one property
+        let input = b"O:7:\"MyClass\":1:{s:4:\"Text\";s:5:\"Hello\";}";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: Message = Deserialize::deserialize(&mut deserializer).unwrap();
+        assert_eq!(result, Message::Text("Hello".to_string()));
     }
 
     #[test]
