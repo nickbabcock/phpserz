@@ -53,6 +53,9 @@ impl<'de> PhpDeserializer<'de> {
                 de: self,
                 remaining: properties,
             }),
+            PhpToken::CustomObject { payload, .. } => {
+                visitor.visit_borrowed_bytes(payload.as_bytes())
+            }
             PhpToken::Reference(r) => visitor.visit_i64(r),
             _ => Err(Error::from(ErrorKind::Deserialize {
                 message: "Unexpected token".to_string(),
@@ -1419,6 +1422,14 @@ mod tests {
                 power: CoPower::SuperPower,
             }
         );
+    }
+
+    #[test]
+    fn test_deserialize_custom_object_as_bytes() {
+        let input = b"C:5:\"Test2\":6:{foobar}";
+        let mut deserializer = PhpDeserializer::new(&input[..]);
+        let result: Result<&[u8], _> = Deserialize::deserialize(&mut deserializer);
+        assert_eq!(result.unwrap(), b"foobar");
     }
 
     #[test]

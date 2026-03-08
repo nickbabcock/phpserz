@@ -116,6 +116,12 @@ pub enum PhpToken<'a> {
     /// The object token.
     Object { class: PhpBstr<'a>, properties: u32 },
 
+    /// A custom-serialized object token.
+    CustomObject {
+        class: PhpBstr<'a>,
+        payload: PhpBstr<'a>,
+    },
+
     /// The end of an array or object.
     End,
 
@@ -133,6 +139,7 @@ pub enum PhpTokenKind {
     String,
     Array,
     Object,
+    CustomObject,
     End,
     Reference,
 }
@@ -186,6 +193,7 @@ impl<'a> PhpParser<'a> {
             return Ok(None);
         };
 
+        self.data = rest;
         let kind = match c {
             b'N' => PhpTokenKind::Null,
             b'b' => PhpTokenKind::Boolean,
@@ -194,6 +202,7 @@ impl<'a> PhpParser<'a> {
             b's' => PhpTokenKind::String,
             b'a' => PhpTokenKind::Array,
             b'O' => PhpTokenKind::Object,
+            b'C' => PhpTokenKind::CustomObject,
             b'r' => PhpTokenKind::Reference,
             b'}' => PhpTokenKind::End,
             _ => {
@@ -233,6 +242,7 @@ impl<'a> PhpParser<'a> {
             b's' => PhpTokenKind::String,
             b'a' => PhpTokenKind::Array,
             b'O' => PhpTokenKind::Object,
+            b'C' => PhpTokenKind::CustomObject,
             b'r' => PhpTokenKind::Reference,
             b'}' => PhpTokenKind::End,
             _ => {
@@ -346,6 +356,28 @@ impl<'a> PhpParser<'a> {
                 self.expect(b'{')?;
 
                 Ok(PhpToken::Object { class, properties })
+            }
+            PhpTokenKind::CustomObject => {
+                self.expect(b':')?;
+                let (class, rest) = read_str(self.data).map_err(|e| self.map_error(e))?;
+                self.data = rest;
+                self.expect(b':')?;
+
+                let (payload_len, rest) =
+                    read_u32(self.data, b':').map_err(|e| self.map_error(e))?;
+                self.data = rest;
+                self.expect(b'{')?;
+
+                let Some((payload, rest)) = self.data.split_at_checked(payload_len as usize) else {
+                    return Err(ErrorKind::Eof.into());
+                };
+                self.data = rest;
+                self.expect(b'}')?;
+
+                Ok(PhpToken::CustomObject {
+                    class,
+                    payload: PhpBstr::new(payload),
+                })
             }
             PhpTokenKind::Reference => {
                 self.expect(b':')?;
@@ -863,6 +895,16 @@ mod tests {
             PhpToken::String(PhpBstr::new(b"hello")),
             PhpToken::End,
         ];
+        validate_tokens(input, &expected);
+    }
+
+    #[test]
+    fn test_parse_custom_object() {
+        let input = b"C:5:\"Test2\":6:{foobar}";
+        let expected = [PhpToken::CustomObject {
+            class: PhpBstr::new(b"Test2"),
+            payload: PhpBstr::new(b"foobar"),
+        }];
         validate_tokens(input, &expected);
     }
 
