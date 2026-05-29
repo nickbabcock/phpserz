@@ -1,8 +1,8 @@
 # PHPserz
 
-A Rust crate for parsing and deserializing the PHP serialization format[^wiki].
+A Rust crate for parsing, deserializing, and serializing the PHP serialization format[^wiki].
 
-[^wiki]: [As documented by wikipedia](https://en.wikipedia.org/wiki/PHP_serialization_format)
+[^wiki]: As documented by [wikipedia](https://en.wikipedia.org/wiki/PHP_serialization_format) and [PHP internals](https://www.phpinternalsbook.com/php5/classes_objects/serialization.html)
 
 ## Features
 
@@ -92,6 +92,47 @@ assert_eq!(
 );
 }
 ```
+
+### Serialization
+
+PHPserz can serialize Rust types back into the PHP serialization format.
+
+```rust
+#[cfg(feature = "serde")] {
+use phpserz::{PhpSerializer, StructStyle};
+use serde::Serialize;
+
+#[derive(Serialize)]
+struct Person {
+    name: String,
+    age: i32,
+}
+
+let person = Person { name: "Alice".to_string(), age: 30 };
+
+// By default, structs are encoded as PHP associative arrays.
+let mut buf = Vec::new();
+person.serialize(&mut PhpSerializer::new(&mut buf)).unwrap();
+assert_eq!(
+    String::from_utf8(buf).unwrap(),
+    "a:2:{s:4:\"name\";s:5:\"Alice\";s:3:\"age\";i:30;}"
+);
+
+// Opt into PHP objects, using the struct name as the class name.
+let mut buf = Vec::new();
+person
+    .serialize(&mut PhpSerializer::new(&mut buf).struct_style(StructStyle::Object))
+    .unwrap();
+assert_eq!(
+    String::from_utf8(buf).unwrap(),
+    "O:6:\"Person\":2:{s:4:\"name\";s:5:\"Alice\";s:3:\"age\";i:30;}"
+);
+}
+```
+
+Note that serialized output is not guaranteed to be byte-for-byte identical to
+PHP's own `serialize()`: all struct fields are emitted as public (serde has no
+visibility concept).
 
 ### Token Parsing
 
