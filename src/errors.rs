@@ -23,7 +23,10 @@ impl Error {
             | ErrorKind::InvalidNumber { position }
             | ErrorKind::Overflow { position } => Some(*position),
             ErrorKind::Deserialize { position, .. } => *position,
-            ErrorKind::Eof | ErrorKind::Utf8(_) => None,
+            ErrorKind::Eof
+            | ErrorKind::Utf8(_)
+            | ErrorKind::Serialize { .. }
+            | ErrorKind::Io(_) => None,
         }
     }
 }
@@ -62,6 +65,12 @@ pub enum ErrorKind {
     Overflow {
         position: usize,
     },
+    /// An error produced while serializing a value to PHP serialized data.
+    Serialize {
+        message: String,
+    },
+    /// An I/O error occurred while writing serialized data.
+    Io(std::io::Error),
 }
 
 impl std::error::Error for Error {
@@ -75,8 +84,10 @@ impl std::error::Error for Error {
             | ErrorKind::StringTooLong { .. }
             | ErrorKind::InvalidNumber { .. }
             | ErrorKind::Overflow { .. }
+            | ErrorKind::Serialize { .. }
             | ErrorKind::MissingQuotes { .. } => None,
             ErrorKind::Utf8(err) => Some(err),
+            ErrorKind::Io(err) => Some(err),
         }
     }
 }
@@ -136,6 +147,8 @@ impl std::fmt::Display for Error {
             }
             ErrorKind::Overflow { position } => write!(f, "Overflow at position: {position}"),
             ErrorKind::Utf8(err) => write!(f, "UTF-8 conversion error: {err}"),
+            ErrorKind::Serialize { message } => write!(f, "Serialization error: {message}"),
+            ErrorKind::Io(err) => write!(f, "I/O error: {err}"),
         }
     }
 }
@@ -146,12 +159,27 @@ impl From<ErrorKind> for Error {
     }
 }
 
+impl From<std::io::Error> for Error {
+    fn from(err: std::io::Error) -> Self {
+        Self::from(ErrorKind::Io(err))
+    }
+}
+
 #[cfg(feature = "serde")]
 impl serde::de::Error for Error {
     fn custom<T: std::fmt::Display>(msg: T) -> Self {
         Self::from(ErrorKind::Deserialize {
             message: msg.to_string(),
             position: None,
+        })
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::ser::Error for Error {
+    fn custom<T: std::fmt::Display>(msg: T) -> Self {
+        Self::from(ErrorKind::Serialize {
+            message: msg.to_string(),
         })
     }
 }
